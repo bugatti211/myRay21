@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 import concurrent.futures
+import json
 import os
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urldefrag
 
-from check_keys import XRAY_BIN_PATH, TIMEOUT_SEC, iter_links, make_config, parse_link, reserve_port
+try:
+    from check_keys import XRAY_BIN_PATH, canonicalize_link, iter_links, make_config, parse_link, reserve_port
+except ModuleNotFoundError:
+    from src.check_keys import XRAY_BIN_PATH, canonicalize_link, iter_links, make_config, parse_link, reserve_port
 
 # ===== Settings (edit here) =====
 INPUT_DIR = Path("file/valid_keys")
@@ -30,9 +34,17 @@ OUTPUT_LIMITS = {
     "vless": 200,
     "keys": 200,
 }
-MAX_WORKERS = 80
-COUNTRY_TIMEOUT_SEC = TIMEOUT_SEC
+GEO_EXTRA_SCAN = {
+    "ss": 25,
+    "vless": 120,
+    "keys": 80,
+}
+MAX_WORKERS = 40
+COUNTRY_TIMEOUT_SEC = 5.0
 DESCRIPTION_PREFIX = "t.me@freekesha21"
+
+COUNTRY_CACHE_PATH = Path("file/cache/country_cache.json")
+COUNTRY_CACHE_TTL_SEC = 7 * 24 * 3600
 # ================================
 
 
@@ -41,6 +53,60 @@ class LinkCountry:
     source: str
     link: str
     country_code: str
+
+
+def load_country_cache(path: Path) -> Dict[str, Dict[str, object]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Dict[str, object]] = {}
+    for key, value in raw.items():
+        if isinstance(key, str) and isinstance(value, dict):
+            out[key] = value
+    return out
+
+
+def save_country_cache(path: Path, cache: Dict[str, Dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+        json.dump(cache, tmp, ensure_ascii=False)
+        tmp.flush()
+        tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+
+def get_cached_country(cache: Dict[str, Dict[str, object]], link: str, now_ts: float) -> Optional[str]:
+    key = canonicalize_link(link)
+    if not key:
+        return None
+    row = cache.get(key)
+    if not row:
+        return None
+    checked_at = float(row.get("checked_at", 0.0))
+    if now_ts - checked_at > COUNTRY_CACHE_TTL_SEC:
+        return None
+    code = str(row.get("country_code", "")).upper()
+    if len(code) == 2 and code.isalpha():
+        return code
+    return None
+
+
+def put_cached_country(cache: Dict[str, Dict[str, object]], link: str, country_code: str, now_ts: float) -> None:
+    key = canonicalize_link(link)
+    if not key:
+        return
+    code = (country_code or "ZZ").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        code = "ZZ"
+    cache[key] = {
+        "country_code": code,
+        "checked_at": float(now_ts),
+    }
 
 
 def country_to_flag(country_code: str) -> str:
@@ -52,7 +118,6 @@ def country_to_flag(country_code: str) -> str:
 
 def with_description(link: str, seq_no: int, country_code: str) -> str:
     flag = country_to_flag(country_code)
-    # Required format example: %F0%9F%87%B1%F0%9F%87%B9%20
     flag_encoded = quote(flag + " ", safe="")
     clean_link, _ = urldefrag(link.strip())
     return f"{clean_link}#{DESCRIPTION_PREFIX} - {seq_no} {flag_encoded}"
@@ -100,8 +165,6 @@ def detect_country_for_link(link: str, xray_bin: Path, timeout: float, xray_work
     config = make_config(parsed.outbound, socks_port)
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
-        import json
-
         json.dump(config, tmp, ensure_ascii=False)
         tmp.flush()
         config_path = tmp.name
@@ -161,6 +224,20 @@ def write_deck_file(path: Path, rows: List[LinkCountry]) -> None:
     path.write_text("\n".join(out_lines), encoding="utf-8")
 
 
+def build_scan_and_tail(links_by_source: Dict[str, List[str]]) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    scan_links: Dict[str, List[str]] = {}
+    tail_links: Dict[str, List[str]] = {}
+
+    for source, links in links_by_source.items():
+        limit = OUTPUT_LIMITS.get(source, len(links))
+        extra = GEO_EXTRA_SCAN.get(source, 0)
+        scan_limit = min(len(links), limit + extra)
+        scan_links[source] = links[:scan_limit]
+        tail_links[source] = links[scan_limit:]
+
+    return scan_links, tail_links
+
+
 def main() -> int:
     xray_bin = XRAY_BIN_PATH
     if not xray_bin.exists():
@@ -178,16 +255,25 @@ def main() -> int:
             continue
         links_by_source[source] = list(iter_links(file_path))
 
-    total_links = sum(len(v) for v in links_by_source.values())
-    print(f"[info] total keys for geodetect: {total_links}")
+    scan_links, tail_links = build_scan_and_tail(links_by_source)
+    total_scan = sum(len(v) for v in scan_links.values())
+    total_input = sum(len(v) for v in links_by_source.values())
+    print(f"[info] total keys={total_input}, geodetect subset={total_scan}")
 
-    detected: Dict[str, List[LinkCountry]] = {"ss": [], "vless": [], "keys": []}
-    ru_pool: List[LinkCountry] = []
+    country_cache = load_country_cache(COUNTRY_CACHE_PATH)
+    now_ts = time.time()
 
+    ordered_results: Dict[str, Dict[int, LinkCountry]] = {"ss": {}, "vless": {}, "keys": {}}
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_meta = {}
-        for source, links in links_by_source.items():
+
+        for source, links in scan_links.items():
             for idx, link in enumerate(links):
+                cached_code = get_cached_country(country_cache, link=link, now_ts=now_ts)
+                if cached_code is not None:
+                    ordered_results[source][idx] = LinkCountry(source=source, link=link, country_code=cached_code)
+                    continue
+
                 future = executor.submit(
                     detect_country_worker,
                     source,
@@ -196,28 +282,38 @@ def main() -> int:
                     COUNTRY_TIMEOUT_SEC,
                     xray_workdir,
                 )
-                future_to_meta[future] = (source, idx)
+                future_to_meta[future] = (source, idx, link)
 
-        # Keep original order per source.
-        ordered_results: Dict[str, Dict[int, LinkCountry]] = {"ss": {}, "vless": {}, "keys": {}}
         for future in concurrent.futures.as_completed(future_to_meta):
-            source, idx = future_to_meta[future]
+            source, idx, link = future_to_meta[future]
             try:
                 row = future.result()
             except Exception:
-                row = LinkCountry(source=source, link=links_by_source[source][idx], country_code="ZZ")
+                row = LinkCountry(source=source, link=link, country_code="ZZ")
             ordered_results[source][idx] = row
+            put_cached_country(country_cache, link=row.link, country_code=row.country_code, now_ts=time.time())
+
+    detected: Dict[str, List[LinkCountry]] = {"ss": [], "vless": [], "keys": []}
+    ru_pool: List[LinkCountry] = []
 
     for source in ("ss", "vless", "keys"):
-        for idx in range(len(links_by_source[source])):
-            row = ordered_results[source].get(
-                idx, LinkCountry(source=source, link=links_by_source[source][idx], country_code="ZZ")
-            )
+        links = scan_links[source]
+        for idx in range(len(links)):
+            row = ordered_results[source].get(idx, LinkCountry(source=source, link=links[idx], country_code="ZZ"))
             code = row.country_code.upper()
             if source in {"ss", "vless"} and code == "RU":
                 ru_pool.append(row)
             else:
                 detected[source].append(row)
+
+    for source in ("ss", "vless", "keys"):
+        limit = OUTPUT_LIMITS[source]
+        if len(detected[source]) >= limit:
+            continue
+
+        missing = limit - len(detected[source])
+        for link in tail_links[source][:missing]:
+            detected[source].append(LinkCountry(source=source, link=link, country_code="ZZ"))
 
     ss_rows = detected["ss"][: OUTPUT_LIMITS["ss"]]
     vless_rows = detected["vless"][: OUTPUT_LIMITS["vless"]]
@@ -227,6 +323,8 @@ def main() -> int:
     write_deck_file(OUTPUT_FILES["vless"], vless_rows)
     write_deck_file(OUTPUT_FILES["keys"], keys_rows)
     write_deck_file(OUTPUT_FILES["ru"], ru_pool)
+
+    save_country_cache(COUNTRY_CACHE_PATH, country_cache)
 
     print(
         "[done] deck files created: "

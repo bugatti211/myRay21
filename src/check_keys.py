@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import concurrent.futures
+import hashlib
 import json
 import os
 import random
@@ -11,18 +12,22 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, unquote, urlparse
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, parse_qsl, unquote, urldefrag, urlencode, urlparse
 
 # ===== Settings (edit here) =====
 XRAY_BIN_PATH = Path("xrayFile/xray")
 TEST_URL = "https://www.gstatic.com/generate_204"
-TIMEOUT_SEC = 10.0
-MAX_WORKERS = 100
+TIMEOUT_SEC = 6.0
+MAX_WORKERS = 60
+PRECHECK_TIMEOUT_SEC = 1.8
 LIMIT = 0  # 0 = all links
-FAIL_STREAK_FOR_SKIP = 3
-BASE_SKIP_AHEAD = 3
-MAX_SKIP_AHEAD = 15
+FAIL_STREAK_FOR_SKIP = 4
+BASE_SKIP_AHEAD = 2
+MAX_SKIP_AHEAD = 8
+
+CACHE_PATH = Path("file/cache/check_cache.json")
+CACHE_TTL_SEC = 12 * 3600
 
 SOURCE_JOBS = [
     {
@@ -413,6 +418,127 @@ def reserve_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def canonicalize_link(link: str) -> str:
+    clean_link, _ = urldefrag((link or "").strip())
+    if not clean_link:
+        return ""
+
+    try:
+        parsed = urlparse(clean_link)
+    except ValueError:
+        return clean_link
+    if not parsed.scheme:
+        return clean_link
+
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    if query_pairs:
+        query_pairs.sort()
+        normalized_query = urlencode(query_pairs, doseq=True)
+        parsed = parsed._replace(query=normalized_query)
+
+    parsed = parsed._replace(fragment="")
+    return parsed.geturl()
+
+
+def dedupe_links(links: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for link in links:
+        normalized = canonicalize_link(link)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(link.strip())
+    return out
+
+
+def _cache_key(link: str) -> str:
+    normalized = canonicalize_link(link)
+    return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def load_cache(path: Path) -> Dict[str, Dict[str, Any]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    cache: Dict[str, Dict[str, Any]] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, dict):
+            cache[k] = v
+    return cache
+
+
+def save_cache(path: Path, cache: Dict[str, Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tmp:
+        json.dump(cache, tmp, ensure_ascii=False)
+        tmp.flush()
+        temp_name = tmp.name
+    os.replace(temp_name, path)
+
+
+def get_fresh_cache_entry(
+    cache: Dict[str, Dict[str, Any]],
+    link: str,
+    now_ts: float,
+) -> Optional[Dict[str, Any]]:
+    entry = cache.get(_cache_key(link))
+    if not entry:
+        return None
+    checked_at = float(entry.get("checked_at", 0.0))
+    if now_ts - checked_at > CACHE_TTL_SEC:
+        return None
+    return entry
+
+
+def update_cache_entry(
+    cache: Dict[str, Dict[str, Any]],
+    link: str,
+    ok: bool,
+    latency_ms: float,
+    reason: str,
+    checked_at: float,
+) -> None:
+    cache[_cache_key(link)] = {
+        "ok": bool(ok),
+        "latency_ms": float(latency_ms),
+        "reason": reason,
+        "checked_at": float(checked_at),
+    }
+
+
+def extract_host_port_for_precheck(link: str) -> Tuple[str, int]:
+    parsed = parse_link(link)
+    outbound = parsed.outbound
+
+    if parsed.protocol in {"vless", "vmess"}:
+        server = outbound["settings"]["vnext"][0]
+        host = str(server["address"])
+        port = int(server["port"])
+    elif parsed.protocol in {"trojan", "ss"}:
+        server = outbound["settings"]["servers"][0]
+        host = str(server["address"])
+        port = int(server["port"])
+    else:
+        raise ValueError("unsupported protocol")
+
+    return host, port
+
+
+def fast_precheck(link: str, timeout: float) -> bool:
+    try:
+        host, port = extract_host_port_for_precheck(link)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def probe_via_socks(socks_port: int, test_url: str, timeout: float) -> float:
     cmd = [
         "curl",
@@ -513,6 +639,7 @@ def collect_valid_links(
     target_valid: int,
     xray_bin_abs: Path,
     xray_workdir: Path,
+    cache: Dict[str, Dict[str, Any]],
 ) -> bool:
     if not input_path.exists():
         print(f"[warn] Input file not found: {input_path}")
@@ -520,10 +647,11 @@ def collect_valid_links(
         output_path.write_text("", encoding="utf-8")
         return False
 
-    links = list(iter_links(input_path))
+    links_raw = list(iter_links(input_path))
     if LIMIT > 0:
-        links = links[:LIMIT]
+        links_raw = links_raw[:LIMIT]
 
+    links = dedupe_links(links_raw)
     total = len(links)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("", encoding="utf-8")
@@ -532,9 +660,9 @@ def collect_valid_links(
         print(f"[info] No links found in input: {input_path}")
         return True
 
-    if len(set(links)) < target_valid:
+    if total < target_valid:
         print(
-            f"[warn] unique input links ({len(set(links))}) < target ({target_valid}) for {input_path}"
+            f"[warn] unique normalized links ({total}) < target ({target_valid}) for {input_path}"
         )
 
     ok = 0
@@ -544,32 +672,77 @@ def collect_valid_links(
     seen_valid = set()
     started = time.time()
 
-    print(f"[start] {input_path} -> {output_path}, target={target_valid}, total={total}")
+    print(
+        f"[start] {input_path} -> {output_path}, "
+        f"raw={len(links_raw)} unique={total}, target={target_valid}"
+    )
 
     with output_path.open("a", encoding="utf-8") as out_valid:
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             while ok < target_valid and cursor < total:
-                batch: List[str] = []
-                for _ in range(MAX_WORKERS):
-                    if cursor >= total or ok >= target_valid:
-                        break
-                    batch.append(links[cursor])
+                xray_batch: List[Tuple[str, str]] = []
+
+                while len(xray_batch) < MAX_WORKERS and cursor < total and ok < target_valid:
+                    link = links[cursor]
                     cursor += 1
+                    normalized = canonicalize_link(link)
+                    now_ts = time.time()
 
-                if not batch:
-                    break
+                    cached = get_fresh_cache_entry(cache, link=link, now_ts=now_ts)
+                    if cached is not None:
+                        if bool(cached.get("ok", False)):
+                            if normalized not in seen_valid:
+                                out_valid.write(link + "\n")
+                                out_valid.flush()
+                                seen_valid.add(normalized)
+                                ok += 1
+                                latency_ms = float(cached.get("latency_ms", -1.0))
+                                print(f"[CACHE_OK]: {latency_ms:.0f}ms ({ok}/{target_valid})")
+                            fail_streak = 0
+                        else:
+                            bad += 1
+                            fail_streak += 1
+                            print("[CACHE_FAIL]: -1")
+                        if fail_streak >= FAIL_STREAK_FOR_SKIP:
+                            dynamic_skip = BASE_SKIP_AHEAD + (fail_streak - FAIL_STREAK_FOR_SKIP)
+                            jump = min(dynamic_skip, MAX_SKIP_AHEAD, max(0, total - cursor))
+                            cursor += jump
+                        continue
 
-                results: List[Optional[tuple]] = [None] * len(batch)
+                    if not fast_precheck(link=link, timeout=PRECHECK_TIMEOUT_SEC):
+                        bad += 1
+                        fail_streak += 1
+                        update_cache_entry(
+                            cache,
+                            link=link,
+                            ok=False,
+                            latency_ms=-1.0,
+                            reason="precheck",
+                            checked_at=now_ts,
+                        )
+                        print("[PRECHECK_FAIL]: -1")
+                        if fail_streak >= FAIL_STREAK_FOR_SKIP:
+                            dynamic_skip = BASE_SKIP_AHEAD + (fail_streak - FAIL_STREAK_FOR_SKIP)
+                            jump = min(dynamic_skip, MAX_SKIP_AHEAD, max(0, total - cursor))
+                            cursor += jump
+                        continue
+
+                    xray_batch.append((link, normalized))
+
+                if not xray_batch:
+                    continue
+
+                results: List[Optional[tuple]] = [None] * len(xray_batch)
                 future_to_idx = {
                     executor.submit(
                         check_link_worker,
-                        link,
+                        item[0],
                         xray_bin_abs,
                         TEST_URL,
                         TIMEOUT_SEC,
                         xray_workdir,
                     ): idx
-                    for idx, link in enumerate(batch)
+                    for idx, item in enumerate(xray_batch)
                 }
 
                 for future in concurrent.futures.as_completed(future_to_idx):
@@ -580,15 +753,25 @@ def collect_valid_links(
                         results[idx] = (False, -1.0)
 
                 for idx, result in enumerate(results):
-                    link = batch[idx]
+                    link, normalized = xray_batch[idx]
                     success, latency_ms = result if result is not None else (False, -1.0)
+                    now_ts = time.time()
+
+                    update_cache_entry(
+                        cache,
+                        link=link,
+                        ok=bool(success),
+                        latency_ms=float(latency_ms),
+                        reason="xray",
+                        checked_at=now_ts,
+                    )
 
                     if success:
                         fail_streak = 0
-                        if link not in seen_valid:
+                        if normalized not in seen_valid:
                             out_valid.write(link + "\n")
                             out_valid.flush()
-                            seen_valid.add(link)
+                            seen_valid.add(normalized)
                             ok += 1
                             print(f"[DONE]: {latency_ms:.0f}ms ({ok}/{target_valid})")
                             if ok >= target_valid:
@@ -605,10 +788,7 @@ def collect_valid_links(
 
     elapsed = time.time() - started
     if ok < target_valid:
-        # Fallback: top up with random unique links from the same source file
-        # when validation did not gather enough keys.
-        unique_links = list(dict.fromkeys(links))
-        pool = [link for link in unique_links if link not in seen_valid]
+        pool = [link for link in links if canonicalize_link(link) not in seen_valid]
         random.shuffle(pool)
         need = target_valid - ok
         filler = pool[:need]
@@ -637,6 +817,7 @@ def main() -> int:
     xray_workdir = xray_bin.parent.resolve()
     xray_bin_abs = xray_bin.resolve()
     overall_ok = True
+    cache = load_cache(CACHE_PATH)
 
     for job in SOURCE_JOBS:
         ok = collect_valid_links(
@@ -645,9 +826,11 @@ def main() -> int:
             target_valid=int(job["target"]),
             xray_bin_abs=xray_bin_abs,
             xray_workdir=xray_workdir,
+            cache=cache,
         )
         overall_ok = overall_ok and ok
 
+    save_cache(CACHE_PATH, cache)
     return 0 if overall_ok else 1
 
 
