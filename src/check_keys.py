@@ -1,0 +1,655 @@
+#!/usr/bin/env python3
+import base64
+import concurrent.futures
+import json
+import os
+import random
+import socket
+import string
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, unquote, urlparse
+
+# ===== Settings (edit here) =====
+XRAY_BIN_PATH = Path("xrayFile/xray")
+TEST_URL = "https://www.gstatic.com/generate_204"
+TIMEOUT_SEC = 10.0
+MAX_WORKERS = 100
+LIMIT = 0  # 0 = all links
+FAIL_STREAK_FOR_SKIP = 3
+BASE_SKIP_AHEAD = 3
+MAX_SKIP_AHEAD = 15
+
+SOURCE_JOBS = [
+    {
+        "name": "ss",
+        "input": Path("file/git_keys/default/ss.txt"),
+        "output": Path("file/checked_keys/ss.txt"),
+        "target": 100,
+    },
+    {
+        "name": "vless",
+        "input": Path("file/git_keys/default/vless.txt"),
+        "output": Path("file/checked_keys/vless.txt"),
+        "target": 500,
+    },
+    {
+        "name": "keys",
+        "input": Path("file/git_keys/whiteList/keys.txt"),
+        "output": Path("file/checked_keys/keys.txt"),
+        "target": 500,
+    },
+]
+
+# ================================
+
+
+@dataclass
+class ParseResult:
+    protocol: str
+    outbound: Dict[str, Any]
+
+
+def _q(query: Dict[str, List[str]], key: str, default: str = "") -> str:
+    values = query.get(key)
+    if not values:
+        return default
+    return values[0]
+
+
+def _to_bool(value: str, default: bool = False) -> bool:
+    if value == "":
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _split_csv(value: str) -> List[str]:
+    if not value:
+        return []
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _random_tag(prefix: str = "node") -> str:
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{prefix}-{suffix}"
+
+
+def parse_vless(link: str) -> ParseResult:
+    parsed = urlparse(link)
+    query = parse_qs(parsed.query)
+
+    host = parsed.hostname
+    port = parsed.port or 443
+    user_id = unquote(parsed.username or "")
+    if not host or not user_id:
+        raise ValueError("VLESS link missing host or id")
+
+    network = _q(query, "type", "tcp")
+    security = _q(query, "security", "none")
+
+    outbound: Dict[str, Any] = {
+        "tag": _random_tag("vless"),
+        "protocol": "vless",
+        "settings": {
+            "vnext": [
+                {
+                    "address": host,
+                    "port": port,
+                    "users": [
+                        {
+                            "id": user_id,
+                            "encryption": _q(query, "encryption", "none"),
+                        }
+                    ],
+                }
+            ]
+        },
+        "streamSettings": {
+            "network": network,
+            "security": security,
+        },
+    }
+
+    flow = _q(query, "flow")
+    if flow:
+        outbound["settings"]["vnext"][0]["users"][0]["flow"] = flow
+
+    sni = _q(query, "sni") or _q(query, "serverName")
+    fp = _q(query, "fp")
+    alpn = _split_csv(_q(query, "alpn"))
+
+    if security == "tls":
+        tls_settings: Dict[str, Any] = {
+            "allowInsecure": _to_bool(_q(query, "insecure") or _q(query, "allowInsecure"), False)
+        }
+        if sni:
+            tls_settings["serverName"] = sni
+        if alpn:
+            tls_settings["alpn"] = alpn
+        if fp:
+            tls_settings["fingerprint"] = fp
+        outbound["streamSettings"]["tlsSettings"] = tls_settings
+    elif security == "reality":
+        reality_settings: Dict[str, Any] = {}
+        if sni:
+            reality_settings["serverName"] = sni
+        if fp:
+            reality_settings["fingerprint"] = fp
+        pbk = _q(query, "pbk")
+        sid = _q(query, "sid")
+        spx = _q(query, "spx")
+        if pbk:
+            reality_settings["publicKey"] = pbk
+        if sid:
+            reality_settings["shortId"] = sid
+        if spx:
+            reality_settings["spiderX"] = spx
+        outbound["streamSettings"]["realitySettings"] = reality_settings
+
+    if network == "tcp":
+        header_type = _q(query, "headerType", "none")
+        if header_type and header_type != "none":
+            outbound["streamSettings"]["tcpSettings"] = {
+                "header": {"type": header_type}
+            }
+    elif network == "ws":
+        ws_settings: Dict[str, Any] = {"path": _q(query, "path", "/")}
+        host_header = _q(query, "host")
+        if host_header:
+            ws_settings["headers"] = {"Host": host_header}
+        outbound["streamSettings"]["wsSettings"] = ws_settings
+    elif network == "grpc":
+        grpc_settings: Dict[str, Any] = {
+            "serviceName": _q(query, "serviceName")
+        }
+        authority = _q(query, "authority")
+        if authority:
+            grpc_settings["authority"] = authority
+        mode = _q(query, "mode")
+        if mode == "multi":
+            grpc_settings["multiMode"] = True
+        outbound["streamSettings"]["grpcSettings"] = grpc_settings
+    elif network == "xhttp":
+        xhttp_settings: Dict[str, Any] = {}
+        path = _q(query, "path")
+        host = _q(query, "host")
+        mode = _q(query, "mode")
+        extra = _q(query, "extra")
+        if path:
+            xhttp_settings["path"] = path
+        if host:
+            xhttp_settings["host"] = host
+        if mode:
+            xhttp_settings["mode"] = mode
+        if extra and extra != "null":
+            xhttp_settings["extra"] = extra
+        if xhttp_settings:
+            outbound["streamSettings"]["xhttpSettings"] = xhttp_settings
+    elif network == "httpupgrade":
+        hu_settings: Dict[str, Any] = {}
+        path = _q(query, "path")
+        host = _q(query, "host")
+        if path:
+            hu_settings["path"] = path
+        if host:
+            hu_settings["host"] = host
+        outbound["streamSettings"]["httpupgradeSettings"] = hu_settings
+    elif network == "splithttp":
+        sh_settings: Dict[str, Any] = {}
+        path = _q(query, "path")
+        host = _q(query, "host")
+        if path:
+            sh_settings["path"] = path
+        if host:
+            sh_settings["host"] = host
+        outbound["streamSettings"]["splithttpSettings"] = sh_settings
+
+    return ParseResult(protocol="vless", outbound=outbound)
+
+
+def parse_trojan(link: str) -> ParseResult:
+    parsed = urlparse(link)
+    query = parse_qs(parsed.query)
+
+    host = parsed.hostname
+    port = parsed.port or 443
+    password = unquote(parsed.username or "")
+    if not host or not password:
+        raise ValueError("Trojan link missing host or password")
+
+    network = _q(query, "type", "tcp")
+    security = _q(query, "security", "tls")
+
+    outbound: Dict[str, Any] = {
+        "tag": _random_tag("trojan"),
+        "protocol": "trojan",
+        "settings": {
+            "servers": [{"address": host, "port": port, "password": password}]
+        },
+        "streamSettings": {
+            "network": network,
+            "security": security,
+        },
+    }
+
+    sni = _q(query, "sni") or _q(query, "serverName")
+    if security == "tls":
+        tls_settings: Dict[str, Any] = {
+            "allowInsecure": _to_bool(_q(query, "insecure") or _q(query, "allowInsecure"), False)
+        }
+        if sni:
+            tls_settings["serverName"] = sni
+        alpn = _split_csv(_q(query, "alpn"))
+        if alpn:
+            tls_settings["alpn"] = alpn
+        outbound["streamSettings"]["tlsSettings"] = tls_settings
+
+    if network == "ws":
+        ws_settings: Dict[str, Any] = {"path": _q(query, "path", "/")}
+        host_header = _q(query, "host")
+        if host_header:
+            ws_settings["headers"] = {"Host": host_header}
+        outbound["streamSettings"]["wsSettings"] = ws_settings
+
+    return ParseResult(protocol="trojan", outbound=outbound)
+
+
+def parse_vmess(link: str) -> ParseResult:
+    raw = link[len("vmess://") :]
+    try:
+        pad = "=" * ((4 - len(raw) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(raw + pad).decode("utf-8")
+        conf = json.loads(decoded)
+    except Exception as exc:
+        raise ValueError(f"Bad vmess link: {exc}") from exc
+
+    host = conf.get("add")
+    port = int(conf.get("port", 443))
+    user_id = conf.get("id")
+    if not host or not user_id:
+        raise ValueError("VMESS link missing add/id")
+
+    net = conf.get("net", "tcp")
+    tls_mode = conf.get("tls", "")
+    security = "tls" if tls_mode in {"tls", "reality"} else "none"
+
+    outbound: Dict[str, Any] = {
+        "tag": _random_tag("vmess"),
+        "protocol": "vmess",
+        "settings": {
+            "vnext": [
+                {
+                    "address": host,
+                    "port": port,
+                    "users": [
+                        {
+                            "id": user_id,
+                            "alterId": int(conf.get("aid", 0)),
+                            "security": conf.get("scy", "auto"),
+                        }
+                    ],
+                }
+            ]
+        },
+        "streamSettings": {
+            "network": net,
+            "security": security,
+        },
+    }
+
+    if security == "tls":
+        tls_settings: Dict[str, Any] = {}
+        if conf.get("sni"):
+            tls_settings["serverName"] = conf["sni"]
+        if conf.get("allowInsecure") is not None:
+            tls_settings["allowInsecure"] = bool(conf["allowInsecure"])
+        if tls_settings:
+            outbound["streamSettings"]["tlsSettings"] = tls_settings
+
+    if net == "ws":
+        ws_settings: Dict[str, Any] = {"path": conf.get("path", "/")}
+        host_header = conf.get("host")
+        if host_header:
+            ws_settings["headers"] = {"Host": host_header}
+        outbound["streamSettings"]["wsSettings"] = ws_settings
+
+    return ParseResult(protocol="vmess", outbound=outbound)
+
+
+def parse_ss(link: str) -> ParseResult:
+    parsed = urlparse(link)
+    if not parsed.hostname:
+        raise ValueError("SS link missing host")
+    host = parsed.hostname
+    port = parsed.port
+    if not port:
+        raise ValueError("SS link missing port")
+
+    userinfo = parsed.username or ""
+    if not userinfo and parsed.netloc:
+        # ss://BASE64(method:password)@host:port style
+        netloc = parsed.netloc
+        if "@" in netloc:
+            creds_enc = netloc.split("@", 1)[0]
+            pad = "=" * ((4 - len(creds_enc) % 4) % 4)
+            creds = base64.urlsafe_b64decode(creds_enc + pad).decode("utf-8")
+            method, password = creds.split(":", 1)
+        else:
+            raise ValueError("Unsupported SS link format")
+    else:
+        try:
+            pad = "=" * ((4 - len(userinfo) % 4) % 4)
+            creds = base64.urlsafe_b64decode(userinfo + pad).decode("utf-8")
+            method, password = creds.split(":", 1)
+        except Exception as exc:
+            raise ValueError(f"Bad SS credentials: {exc}") from exc
+
+    outbound: Dict[str, Any] = {
+        "tag": _random_tag("ss"),
+        "protocol": "shadowsocks",
+        "settings": {
+            "servers": [
+                {
+                    "address": host,
+                    "port": port,
+                    "method": method,
+                    "password": password,
+                }
+            ]
+        },
+    }
+    return ParseResult(protocol="ss", outbound=outbound)
+
+
+def parse_link(link: str) -> ParseResult:
+    if link.startswith("vless://"):
+        return parse_vless(link)
+    if link.startswith("trojan://"):
+        return parse_trojan(link)
+    if link.startswith("vmess://"):
+        return parse_vmess(link)
+    if link.startswith("ss://"):
+        return parse_ss(link)
+    raise ValueError("Unsupported protocol")
+
+
+def make_config(outbound: Dict[str, Any], socks_port: int) -> Dict[str, Any]:
+    return {
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {
+                "tag": "socks-in",
+                "listen": "127.0.0.1",
+                "port": socks_port,
+                "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": True},
+            }
+        ],
+        "outbounds": [
+            outbound,
+            {"tag": "direct", "protocol": "freedom"},
+            {"tag": "block", "protocol": "blackhole"},
+        ],
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "type": "field",
+                    "inboundTag": ["socks-in"],
+                    "outboundTag": outbound["tag"],
+                }
+            ],
+        },
+    }
+
+
+def reserve_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def probe_via_socks(socks_port: int, test_url: str, timeout: float) -> float:
+    cmd = [
+        "curl",
+        "--silent",
+        "--show-error",
+        "--output",
+        "/dev/null",
+        "--write-out",
+        "%{time_total}",
+        "--max-time",
+        str(timeout),
+        "--proxy",
+        f"socks5h://127.0.0.1:{socks_port}",
+        test_url,
+    ]
+    start = time.time()
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "curl failed")
+    raw = result.stdout.strip()
+    try:
+        sec = float(raw)
+    except ValueError:
+        sec = time.time() - start
+    return sec * 1000.0
+
+
+def check_link(xray_bin: Path, link: str, test_url: str, timeout: float, xray_workdir: Path) -> float:
+    parsed = parse_link(link)
+    socks_port = reserve_port()
+    config = make_config(parsed.outbound, socks_port)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+        json.dump(config, tmp, ensure_ascii=False)
+        tmp.flush()
+        config_path = tmp.name
+
+    proc: Optional[subprocess.Popen] = None
+    try:
+        proc = subprocess.Popen(
+            [str(xray_bin), "run", "-c", config_path],
+            cwd=str(xray_workdir),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        boot_deadline = time.time() + min(3.0, timeout)
+        while time.time() < boot_deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(f"xray exited with code {proc.returncode}")
+            try:
+                with socket.create_connection(("127.0.0.1", socks_port), timeout=0.15):
+                    break
+            except OSError:
+                time.sleep(0.08)
+        else:
+            raise RuntimeError("xray socks inbound did not start")
+
+        return probe_via_socks(socks_port, test_url, timeout)
+    finally:
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+
+
+def iter_links(path: Path):
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        yield line
+
+
+def check_link_worker(link: str, xray_bin: Path, test_url: str, timeout: float, xray_workdir: Path):
+    try:
+        latency_ms = check_link(
+            xray_bin=xray_bin,
+            link=link,
+            test_url=test_url,
+            timeout=timeout,
+            xray_workdir=xray_workdir,
+        )
+        return True, latency_ms
+    except Exception:
+        return False, -1.0
+
+
+def collect_valid_links(
+    input_path: Path,
+    output_path: Path,
+    target_valid: int,
+    xray_bin_abs: Path,
+    xray_workdir: Path,
+) -> bool:
+    if not input_path.exists():
+        print(f"[warn] Input file not found: {input_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("", encoding="utf-8")
+        return False
+
+    links = list(iter_links(input_path))
+    if LIMIT > 0:
+        links = links[:LIMIT]
+
+    total = len(links)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("", encoding="utf-8")
+
+    if total == 0:
+        print(f"[info] No links found in input: {input_path}")
+        return True
+
+    if len(set(links)) < target_valid:
+        print(
+            f"[warn] unique input links ({len(set(links))}) < target ({target_valid}) for {input_path}"
+        )
+
+    ok = 0
+    bad = 0
+    cursor = 0
+    fail_streak = 0
+    seen_valid = set()
+    started = time.time()
+
+    print(f"[start] {input_path} -> {output_path}, target={target_valid}, total={total}")
+
+    with output_path.open("a", encoding="utf-8") as out_valid:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            while ok < target_valid and cursor < total:
+                batch: List[str] = []
+                for _ in range(MAX_WORKERS):
+                    if cursor >= total or ok >= target_valid:
+                        break
+                    batch.append(links[cursor])
+                    cursor += 1
+
+                if not batch:
+                    break
+
+                results: List[Optional[tuple]] = [None] * len(batch)
+                future_to_idx = {
+                    executor.submit(
+                        check_link_worker,
+                        link,
+                        xray_bin_abs,
+                        TEST_URL,
+                        TIMEOUT_SEC,
+                        xray_workdir,
+                    ): idx
+                    for idx, link in enumerate(batch)
+                }
+
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception:
+                        results[idx] = (False, -1.0)
+
+                for idx, result in enumerate(results):
+                    link = batch[idx]
+                    success, latency_ms = result if result is not None else (False, -1.0)
+
+                    if success:
+                        fail_streak = 0
+                        if link not in seen_valid:
+                            out_valid.write(link + "\n")
+                            out_valid.flush()
+                            seen_valid.add(link)
+                            ok += 1
+                            print(f"[DONE]: {latency_ms:.0f}ms ({ok}/{target_valid})")
+                            if ok >= target_valid:
+                                break
+                    else:
+                        bad += 1
+                        fail_streak += 1
+                        print("[FAIL]: -1")
+
+                        if fail_streak >= FAIL_STREAK_FOR_SKIP:
+                            dynamic_skip = BASE_SKIP_AHEAD + (fail_streak - FAIL_STREAK_FOR_SKIP)
+                            jump = min(dynamic_skip, MAX_SKIP_AHEAD, max(0, total - cursor))
+                            cursor += jump
+
+    elapsed = time.time() - started
+    if ok < target_valid:
+        # Fallback: top up with random unique links from the same source file
+        # when validation did not gather enough keys.
+        unique_links = list(dict.fromkeys(links))
+        pool = [link for link in unique_links if link not in seen_valid]
+        random.shuffle(pool)
+        need = target_valid - ok
+        filler = pool[:need]
+
+        if filler:
+            with output_path.open("a", encoding="utf-8") as out_valid:
+                for link in filler:
+                    out_valid.write(link + "\n")
+            ok += len(filler)
+            print(
+                f"[warn] target not reached after checks; added random fallback keys: {len(filler)}"
+            )
+
+        if ok < target_valid:
+            print(f"[warn] still below target: {ok}/{target_valid} (not enough unique links in source)")
+    print(f"done total={total} valid={ok} fail={bad} elapsed={elapsed:.1f}s file={output_path}")
+    return True
+
+
+def main() -> int:
+    xray_bin = XRAY_BIN_PATH
+    if not xray_bin.exists():
+        print(f"[error] Xray binary not found: {xray_bin}")
+        return 1
+
+    xray_workdir = xray_bin.parent.resolve()
+    xray_bin_abs = xray_bin.resolve()
+    overall_ok = True
+
+    for job in SOURCE_JOBS:
+        ok = collect_valid_links(
+            input_path=job["input"],
+            output_path=job["output"],
+            target_valid=int(job["target"]),
+            xray_bin_abs=xray_bin_abs,
+            xray_workdir=xray_workdir,
+        )
+        overall_ok = overall_ok and ok
+
+    return 0 if overall_ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
