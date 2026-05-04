@@ -14,6 +14,10 @@ try:
     from check_keys import XRAY_BIN_PATH, canonicalize_link, iter_links, make_config, parse_link, reserve_port
 except ModuleNotFoundError:
     from src.check_keys import XRAY_BIN_PATH, canonicalize_link, iter_links, make_config, parse_link, reserve_port
+try:
+    from project_config import env_float, env_int
+except ModuleNotFoundError:
+    from src.project_config import env_float, env_int
 
 # ===== Settings (edit here) =====
 INPUT_DIR = Path("file/valid_keys")
@@ -39,12 +43,12 @@ GEO_EXTRA_SCAN = {
     "vless": 120,
     "keys": 80,
 }
-MAX_WORKERS = 40
-COUNTRY_TIMEOUT_SEC = 5.0
+MAX_WORKERS = env_int("RAY_GEO_WORKERS", 40, minimum=1)
+COUNTRY_TIMEOUT_SEC = env_float("RAY_GEO_TIMEOUT_SEC", 5.0, minimum=0.5)
 DESCRIPTION_PREFIX = "t.me@freekesha21"
 
 COUNTRY_CACHE_PATH = Path("file/cache/country_cache.json")
-COUNTRY_CACHE_TTL_SEC = 7 * 24 * 3600
+COUNTRY_CACHE_TTL_SEC = env_int("RAY_GEO_CACHE_TTL_SEC", 7 * 24 * 3600, minimum=60)
 # ================================
 
 
@@ -264,14 +268,29 @@ def main() -> int:
     now_ts = time.time()
 
     ordered_results: Dict[str, Dict[int, LinkCountry]] = {"ss": {}, "vless": {}, "keys": {}}
+    run_dedupe: Dict[str, str] = {}
+    stats = {"cache_hit": 0, "run_dedupe_hit": 0, "geo_detect": 0}
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_meta = {}
 
         for source, links in scan_links.items():
             for idx, link in enumerate(links):
+                normalized = canonicalize_link(link)
+                if normalized and normalized in run_dedupe:
+                    ordered_results[source][idx] = LinkCountry(
+                        source=source,
+                        link=link,
+                        country_code=run_dedupe[normalized],
+                    )
+                    stats["run_dedupe_hit"] += 1
+                    continue
+
                 cached_code = get_cached_country(country_cache, link=link, now_ts=now_ts)
                 if cached_code is not None:
                     ordered_results[source][idx] = LinkCountry(source=source, link=link, country_code=cached_code)
+                    if normalized:
+                        run_dedupe[normalized] = cached_code
+                    stats["cache_hit"] += 1
                     continue
 
                 future = executor.submit(
@@ -283,6 +302,7 @@ def main() -> int:
                     xray_workdir,
                 )
                 future_to_meta[future] = (source, idx, link)
+                stats["geo_detect"] += 1
 
         for future in concurrent.futures.as_completed(future_to_meta):
             source, idx, link = future_to_meta[future]
@@ -291,6 +311,9 @@ def main() -> int:
             except Exception:
                 row = LinkCountry(source=source, link=link, country_code="ZZ")
             ordered_results[source][idx] = row
+            normalized = canonicalize_link(row.link)
+            if normalized:
+                run_dedupe[normalized] = row.country_code
             put_cached_country(country_cache, link=row.link, country_code=row.country_code, now_ts=time.time())
 
     detected: Dict[str, List[LinkCountry]] = {"ss": [], "vless": [], "keys": []}
@@ -331,6 +354,7 @@ def main() -> int:
         f"ss={len(ss_rows)}, vless={len(vless_rows)}, "
         f"keys={len(keys_rows)}, RU_keys={len(ru_pool)}"
     )
+    print(f"[stats] geo: {stats}")
     return 0
 
 

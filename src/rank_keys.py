@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import concurrent.futures
+import multiprocessing
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -7,6 +8,10 @@ from pathlib import Path
 from typing import List
 
 from check_keys import XRAY_BIN_PATH, TEST_URL, TIMEOUT_SEC, check_link, iter_links
+try:
+    from project_config import current_profile, env_int
+except ModuleNotFoundError:
+    from src.project_config import current_profile, env_int
 
 # ===== Settings (edit here) =====
 SOURCE_FILES = [
@@ -15,8 +20,13 @@ SOURCE_FILES = [
     Path("file/checked_keys/keys.txt"),
 ]
 VALID_DIR = Path("file/valid_keys")
-ROUNDS = 3
-MAX_WORKERS = 100
+DEFAULT_ROUNDS = 3 if current_profile() == "full" else 1
+ROUNDS = env_int("RAY_RANK_ROUNDS", DEFAULT_ROUNDS, minimum=1)
+MAX_WORKERS = env_int(
+    "RAY_RANK_WORKERS",
+    min(100, max(8, multiprocessing.cpu_count() * 8)),
+    minimum=1,
+)
 # ================================
 
 
@@ -24,6 +34,7 @@ MAX_WORKERS = 100
 class KeyStat:
     idx: int
     link: str
+    rounds_total: int = ROUNDS
     latencies: List[float] = field(default_factory=list)
     fail_count: int = 0
 
@@ -33,7 +44,7 @@ class KeyStat:
 
     @property
     def success_rate(self) -> float:
-        return self.success_count / ROUNDS if ROUNDS > 0 else 0.0
+        return self.success_count / self.rounds_total if self.rounds_total > 0 else 0.0
 
     @property
     def median_ms(self) -> float:
@@ -106,9 +117,15 @@ def rank_file(input_path: Path, valid_dir: Path, xray_bin: Path) -> bool:
 
     started = time.time()
 
+    rounds_for_file = ROUNDS
+    if len(links) <= 120:
+        rounds_for_file = max(1, ROUNDS - 1)
+    for stat in stats:
+        stat.rounds_total = rounds_for_file
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        for round_no in range(1, ROUNDS + 1):
-            print(f"[round {round_no}/{ROUNDS}] checking {len(stats)} keys (parallel={MAX_WORKERS})")
+        for round_no in range(1, rounds_for_file + 1):
+            print(f"[round {round_no}/{rounds_for_file}] checking {len(stats)} keys (parallel={MAX_WORKERS})")
 
             future_to_idx = {
                 executor.submit(
@@ -149,9 +166,12 @@ def rank_file(input_path: Path, valid_dir: Path, xray_bin: Path) -> bool:
             )
 
     elapsed = time.time() - started
+    success_total = sum(s.success_count for s in stats)
+    checks_total = len(stats) * rounds_for_file
+    success_rate = (success_total / checks_total) if checks_total else 0.0
     print(
-        f"done input={len(links_raw)} used={len(links)} rounds={ROUNDS} "
-        f"elapsed={elapsed:.1f}s ranked={output_path} stats={details_path}"
+        f"done input={len(links_raw)} used={len(links)} rounds={rounds_for_file} "
+        f"elapsed={elapsed:.1f}s success={success_rate:.2%} ranked={output_path} stats={details_path}"
     )
     return True
 

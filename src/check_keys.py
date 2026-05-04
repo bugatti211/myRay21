@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import multiprocessing
 import random
 import socket
 import string
@@ -15,19 +16,32 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, parse_qsl, unquote, urldefrag, urlencode, urlparse
 
+try:
+    from project_config import current_profile, env_float, env_int
+except ModuleNotFoundError:
+    from src.project_config import current_profile, env_float, env_int
+
 # ===== Settings (edit here) =====
 XRAY_BIN_PATH = Path("xrayFile/xray")
 TEST_URL = "https://www.gstatic.com/generate_204"
-TIMEOUT_SEC = 6.0
-MAX_WORKERS = 60
-PRECHECK_TIMEOUT_SEC = 1.8
-LIMIT = 0  # 0 = all links
+PROFILE = current_profile()
+DEFAULT_CHECK_TIMEOUT = 6.0 if PROFILE == "full" else 4.0
+DEFAULT_PRECHECK_TIMEOUT = 1.8 if PROFILE == "full" else 1.0
+TIMEOUT_SEC = env_float("RAY_CHECK_TIMEOUT_SEC", DEFAULT_CHECK_TIMEOUT, minimum=0.5)
+MAX_WORKERS = env_int(
+    "RAY_CHECK_WORKERS",
+    min(60, max(8, multiprocessing.cpu_count() * 6)),
+    minimum=1,
+)
+PRECHECK_TIMEOUT_SEC = env_float("RAY_PRECHECK_TIMEOUT_SEC", DEFAULT_PRECHECK_TIMEOUT, minimum=0.1)
+LIMIT = env_int("RAY_CHECK_LIMIT", 0, minimum=0)  # 0 = all links
 FAIL_STREAK_FOR_SKIP = 4
 BASE_SKIP_AHEAD = 2
 MAX_SKIP_AHEAD = 8
 
 CACHE_PATH = Path("file/cache/check_cache.json")
-CACHE_TTL_SEC = 12 * 3600
+OK_CACHE_TTL_SEC = env_int("RAY_CHECK_OK_CACHE_TTL_SEC", 8 * 3600, minimum=60)
+FAIL_CACHE_TTL_SEC = env_int("RAY_CHECK_FAIL_CACHE_TTL_SEC", 90 * 60, minimum=60)
 
 SOURCE_JOBS = [
     {
@@ -49,6 +63,18 @@ SOURCE_JOBS = [
         "target": 500,
     },
 ]
+
+GIT_SUBS_DIR = Path("git")
+DAY_FILES = [
+    "1Mond",
+    "2Tues",
+    "3Wend",
+    "4Thur",
+    "5Frid",
+    "6Satu",
+    "7Sand",
+]
+PRIORITY_MULTIPLIER = 3
 
 # ================================
 
@@ -452,6 +478,60 @@ def dedupe_links(links: List[str]) -> List[str]:
     return out
 
 
+def _existing_files(paths: List[Path]) -> List[Path]:
+    return [p for p in paths if p.exists() and p.is_file()]
+
+
+def latest_day_subscription_files(limit: int = 2) -> List[Path]:
+    candidates = _existing_files([GIT_SUBS_DIR / name for name in DAY_FILES])
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[:limit]
+
+
+def load_priority_links(job_name: str, target_valid: int) -> List[str]:
+    if job_name == "ss":
+        sources = _existing_files(
+            [
+                Path("file/checked_keys/ss.txt"),
+                Path("file/valid_keys/ss.txt"),
+                Path("file/desc_keys/ss.txt"),
+            ]
+        )
+    elif job_name == "vless":
+        sources = _existing_files(
+            [
+                Path("file/checked_keys/vless.txt"),
+                Path("file/valid_keys/vless.txt"),
+                Path("file/desc_keys/vless.txt"),
+            ]
+        )
+        sources.extend(latest_day_subscription_files(limit=2))
+    elif job_name == "keys":
+        sources = _existing_files(
+            [
+                Path("file/checked_keys/keys.txt"),
+                Path("file/valid_keys/keys.txt"),
+                Path("file/desc_keys/keys.txt"),
+                GIT_SUBS_DIR / "WhiteKeys",
+            ]
+        )
+    else:
+        sources = []
+
+    if not sources:
+        return []
+
+    cap = max(target_valid * PRIORITY_MULTIPLIER, target_valid)
+    merged: List[str] = []
+    for src in sources:
+        for link in iter_links(src):
+            merged.append(link)
+            if len(merged) >= cap:
+                return dedupe_links(merged)
+
+    return dedupe_links(merged)
+
+
 def _cache_key(link: str) -> str:
     normalized = canonicalize_link(link)
     return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
@@ -491,7 +571,8 @@ def get_fresh_cache_entry(
     if not entry:
         return None
     checked_at = float(entry.get("checked_at", 0.0))
-    if now_ts - checked_at > CACHE_TTL_SEC:
+    ttl = OK_CACHE_TTL_SEC if bool(entry.get("ok", False)) else FAIL_CACHE_TTL_SEC
+    if now_ts - checked_at > ttl:
         return None
     return entry
 
@@ -633,7 +714,15 @@ def check_link_worker(link: str, xray_bin: Path, test_url: str, timeout: float, 
         return False, -1.0
 
 
+def fast_precheck_worker(link: str, timeout: float):
+    try:
+        return fast_precheck(link=link, timeout=timeout)
+    except Exception:
+        return False
+
+
 def collect_valid_links(
+    job_name: str,
     input_path: Path,
     output_path: Path,
     target_valid: int,
@@ -647,7 +736,9 @@ def collect_valid_links(
         output_path.write_text("", encoding="utf-8")
         return False
 
-    links_raw = list(iter_links(input_path))
+    priority_links = load_priority_links(job_name=job_name, target_valid=target_valid)
+    source_links = list(iter_links(input_path))
+    links_raw = priority_links + source_links
     if LIMIT > 0:
         links_raw = links_raw[:LIMIT]
 
@@ -671,15 +762,17 @@ def collect_valid_links(
     fail_streak = 0
     seen_valid = set()
     started = time.time()
+    reason_stats = {"cache_ok": 0, "cache_fail": 0, "precheck_fail": 0, "xray_ok": 0, "xray_fail": 0}
 
     print(
         f"[start] {input_path} -> {output_path}, "
-        f"raw={len(links_raw)} unique={total}, target={target_valid}"
+        f"priority={len(priority_links)} raw={len(links_raw)} unique={total}, target={target_valid}"
     )
 
     with output_path.open("a", encoding="utf-8") as out_valid:
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             while ok < target_valid and cursor < total:
+                precheck_batch: List[Tuple[str, str]] = []
                 xray_batch: List[Tuple[str, str]] = []
 
                 while len(xray_batch) < MAX_WORKERS and cursor < total and ok < target_valid:
@@ -698,10 +791,12 @@ def collect_valid_links(
                                 ok += 1
                                 latency_ms = float(cached.get("latency_ms", -1.0))
                                 print(f"[CACHE_OK]: {latency_ms:.0f}ms ({ok}/{target_valid})")
+                            reason_stats["cache_ok"] += 1
                             fail_streak = 0
                         else:
                             bad += 1
                             fail_streak += 1
+                            reason_stats["cache_fail"] += 1
                             print("[CACHE_FAIL]: -1")
                         if fail_streak >= FAIL_STREAK_FOR_SKIP:
                             dynamic_skip = BASE_SKIP_AHEAD + (fail_streak - FAIL_STREAK_FOR_SKIP)
@@ -709,9 +804,36 @@ def collect_valid_links(
                             cursor += jump
                         continue
 
-                    if not fast_precheck(link=link, timeout=PRECHECK_TIMEOUT_SEC):
+                    precheck_batch.append((link, normalized))
+
+                if precheck_batch:
+                    precheck_results: List[Optional[bool]] = [None] * len(precheck_batch)
+                    precheck_future_to_idx = {
+                        executor.submit(
+                            fast_precheck_worker,
+                            item[0],
+                            PRECHECK_TIMEOUT_SEC,
+                        ): idx
+                        for idx, item in enumerate(precheck_batch)
+                    }
+
+                    for future in concurrent.futures.as_completed(precheck_future_to_idx):
+                        idx = precheck_future_to_idx[future]
+                        try:
+                            precheck_results[idx] = bool(future.result())
+                        except Exception:
+                            precheck_results[idx] = False
+
+                    for idx, passed in enumerate(precheck_results):
+                        link, normalized = precheck_batch[idx]
+                        now_ts = time.time()
+                        if passed:
+                            xray_batch.append((link, normalized))
+                            continue
+
                         bad += 1
                         fail_streak += 1
+                        reason_stats["precheck_fail"] += 1
                         update_cache_entry(
                             cache,
                             link=link,
@@ -725,9 +847,6 @@ def collect_valid_links(
                             dynamic_skip = BASE_SKIP_AHEAD + (fail_streak - FAIL_STREAK_FOR_SKIP)
                             jump = min(dynamic_skip, MAX_SKIP_AHEAD, max(0, total - cursor))
                             cursor += jump
-                        continue
-
-                    xray_batch.append((link, normalized))
 
                 if not xray_batch:
                     continue
@@ -773,12 +892,14 @@ def collect_valid_links(
                             out_valid.flush()
                             seen_valid.add(normalized)
                             ok += 1
+                            reason_stats["xray_ok"] += 1
                             print(f"[DONE]: {latency_ms:.0f}ms ({ok}/{target_valid})")
                             if ok >= target_valid:
                                 break
                     else:
                         bad += 1
                         fail_streak += 1
+                        reason_stats["xray_fail"] += 1
                         print("[FAIL]: -1")
 
                         if fail_streak >= FAIL_STREAK_FOR_SKIP:
@@ -804,7 +925,12 @@ def collect_valid_links(
 
         if ok < target_valid:
             print(f"[warn] still below target: {ok}/{target_valid} (not enough unique links in source)")
-    print(f"done total={total} valid={ok} fail={bad} elapsed={elapsed:.1f}s file={output_path}")
+    rate = (ok / elapsed) if elapsed > 0 else 0.0
+    print(
+        f"done total={total} valid={ok} fail={bad} elapsed={elapsed:.1f}s "
+        f"rate={rate:.2f} key/s file={output_path}"
+    )
+    print(f"[stats] {job_name}: {reason_stats}")
     return True
 
 
@@ -821,6 +947,7 @@ def main() -> int:
 
     for job in SOURCE_JOBS:
         ok = collect_valid_links(
+            job_name=str(job["name"]),
             input_path=job["input"],
             output_path=job["output"],
             target_valid=int(job["target"]),
