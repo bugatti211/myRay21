@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -150,17 +151,43 @@ def probe_country_via_socks(socks_port: int, timeout: float) -> str:
             proxy,
             "https://ifconfig.co/country-iso",
         ],
+        [
+            "curl",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            str(timeout),
+            "--proxy",
+            proxy,
+            "https://ipwho.is/?fields=country_code",
+        ],
     ]
 
+    hits: List[str] = []
     for cmd in commands:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             continue
-        code = (result.stdout or "").strip().upper()
+        raw = (result.stdout or "").strip()
+        if raw.startswith("{"):
+            try:
+                data = json.loads(raw)
+                raw = str(data.get("country_code", "")).strip()
+            except Exception:
+                raw = ""
+        code = raw.upper()
         if len(code) == 2 and code.isalpha():
-            return code
+            hits.append(code)
 
-    return "ZZ"
+    if not hits:
+        return "ZZ"
+
+    top_code, top_count = Counter(hits).most_common(1)[0]
+    if top_count >= 2:
+        return top_code
+
+    # If providers disagree, keep first successful result to avoid dropping all geo labels.
+    return hits[0]
 
 
 def detect_country_for_link(link: str, xray_bin: Path, timeout: float, xray_workdir: Path) -> str:

@@ -25,8 +25,8 @@ except ModuleNotFoundError:
 XRAY_BIN_PATH = Path("xrayFile/xray")
 TEST_URL = "https://www.gstatic.com/generate_204"
 PROFILE = current_profile()
-DEFAULT_CHECK_TIMEOUT = 6.0 if PROFILE == "full" else 4.0
-DEFAULT_PRECHECK_TIMEOUT = 1.8 if PROFILE == "full" else 1.0
+DEFAULT_CHECK_TIMEOUT = 6.0 if PROFILE == "full" else 5.0
+DEFAULT_PRECHECK_TIMEOUT = 1.8 if PROFILE == "full" else 1.2
 TIMEOUT_SEC = env_float("RAY_CHECK_TIMEOUT_SEC", DEFAULT_CHECK_TIMEOUT, minimum=0.5)
 MAX_WORKERS = env_int(
     "RAY_CHECK_WORKERS",

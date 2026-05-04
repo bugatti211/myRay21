@@ -20,7 +20,7 @@ SOURCE_FILES = [
     Path("file/checked_keys/keys.txt"),
 ]
 VALID_DIR = Path("file/valid_keys")
-DEFAULT_ROUNDS = 3 if current_profile() == "full" else 1
+DEFAULT_ROUNDS = 3 if current_profile() == "full" else 2
 ROUNDS = env_int("RAY_RANK_ROUNDS", DEFAULT_ROUNDS, minimum=1)
 MAX_WORKERS = env_int(
     "RAY_RANK_WORKERS",
