@@ -4,6 +4,9 @@ import base64
 import os
 import ssl
 import certifi
+import re
+from urllib.parse import unquote
+from urllib.parse import urlsplit, urlunsplit
 
 # ---------------- SSL FIX (macOS) ----------------
 ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=certifi.where())
@@ -15,12 +18,32 @@ WHITELIST_PATH = "file/git_subs/whiteList.txt"
 OUT_VLESS = "file/git_keys/default/vless.txt"
 OUT_SS = "file/git_keys/default/ss.txt"
 OUT_WHITE = "file/git_keys/whiteList/keys.txt"
+FLAG_RE = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
 
 
 # ---------------- URL LIST ----------------
 def load_urls(path):
     with open(path, "r", encoding="utf-8") as f:
         return [x.strip() for x in f if x.strip()]
+
+
+# ---------------- URL NORMALIZATION ----------------
+def normalize_url(url):
+    raw = url.strip()
+
+    # Fragments in source lists (e.g. #OBWL) are local anchors, not part of remote file path.
+    if "#" in raw:
+        raw = raw.split("#", 1)[0]
+
+    # Common GitHub mistake: web blob URL instead of raw URL.
+    if raw.startswith("https://github.com/") and "/blob/" in raw:
+        raw = raw.replace("https://github.com/", "https://raw.githubusercontent.com/", 1)
+        raw = raw.replace("/blob/", "/", 1)
+
+    # Drop accidental trailing slash if it appears after query-only path.
+    parts = urlsplit(raw)
+    cleaned = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+    return cleaned
 
 
 # ---------------- FETCH LAYER ----------------
@@ -66,9 +89,18 @@ def fetch(url):
 
 # ---------------- CLEAN ----------------
 def clean(line):
-    if "#" in line:
-        line = line.split("#")[0]
-    return line.strip()
+    raw = line.strip()
+    if "#" not in raw:
+        return raw
+
+    base, fragment = raw.split("#", 1)
+    desc = unquote(fragment)
+    match = FLAG_RE.search(desc)
+    if not match:
+        return base.strip()
+    # Keep only flag from old description so downstream formatter can rebuild
+    # canonical description as: tg channel + number + flag.
+    return f"{base.strip()}#{match.group(0)}"
 
 
 # ---------------- BASE64 ----------------
@@ -118,8 +150,12 @@ def process(urls):
     vless_all = []
     ss_all = []
 
-    for url in urls:
-        print("fetch:", url)
+    for original_url in urls:
+        url = normalize_url(original_url)
+        if url != original_url:
+            print("fetch:", original_url, "->", url)
+        else:
+            print("fetch:", url)
 
         text = fetch(url)
         print("size:", len(text))

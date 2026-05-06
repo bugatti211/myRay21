@@ -2,6 +2,7 @@
 import concurrent.futures
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -9,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote, urldefrag
+from urllib.parse import quote, unquote, urldefrag
 
 try:
     from check_keys import XRAY_BIN_PATH, canonicalize_link, iter_links, make_config, parse_link, reserve_port
@@ -51,6 +52,8 @@ DESCRIPTION_PREFIX = "t.me@freekesha21"
 COUNTRY_CACHE_PATH = Path("file/cache/country_cache.json")
 COUNTRY_CACHE_TTL_SEC = env_int("RAY_GEO_CACHE_TTL_SEC", 7 * 24 * 3600, minimum=60)
 # ================================
+
+FLAG_RE = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
 
 
 @dataclass
@@ -121,8 +124,30 @@ def country_to_flag(country_code: str) -> str:
     return chr(127397 + ord(code[0])) + chr(127397 + ord(code[1]))
 
 
+def extract_flag_from_link_description(link: str) -> Optional[str]:
+    _, fragment = urldefrag((link or "").strip())
+    if not fragment:
+        return None
+    desc = unquote(fragment)
+    match = FLAG_RE.search(desc)
+    if not match:
+        return None
+    return match.group(0)
+
+
+def flag_to_country_code(flag: str) -> Optional[str]:
+    if not flag or len(flag) != 2:
+        return None
+    a, b = ord(flag[0]), ord(flag[1])
+    base = 127397
+    start = ord("A")
+    if not (127462 <= a <= 127487 and 127462 <= b <= 127487):
+        return None
+    return chr(a - base + start) + chr(b - base + start)
+
+
 def with_description(link: str, seq_no: int, country_code: str) -> str:
-    flag = country_to_flag(country_code)
+    flag = extract_flag_from_link_description(link) or country_to_flag(country_code)
     flag_encoded = quote(flag + " ", safe="")
     clean_link, _ = urldefrag(link.strip())
     return f"{clean_link}#{DESCRIPTION_PREFIX} - {seq_no} {flag_encoded}"
@@ -302,6 +327,25 @@ def main() -> int:
 
         for source, links in scan_links.items():
             for idx, link in enumerate(links):
+                existing_flag = extract_flag_from_link_description(link)
+                if existing_flag:
+                    existing_code = flag_to_country_code(existing_flag) or "ZZ"
+                    ordered_results[source][idx] = LinkCountry(
+                        source=source,
+                        link=link,
+                        country_code=existing_code,
+                    )
+                    normalized = canonicalize_link(link)
+                    if normalized:
+                        run_dedupe[normalized] = existing_code
+                        put_cached_country(
+                            country_cache,
+                            link=link,
+                            country_code=existing_code,
+                            now_ts=now_ts,
+                        )
+                    continue
+
                 normalized = canonicalize_link(link)
                 if normalized and normalized in run_dedupe:
                     ordered_results[source][idx] = LinkCountry(

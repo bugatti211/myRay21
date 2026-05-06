@@ -17,8 +17,8 @@ RETRY_SLEEP_SEC = env_int("RAY_STEP_RETRY_SLEEP_SEC", 8, minimum=0)
 def run_step(title: str, script: Path, project_root: Path, log_file, requires_vpn: bool = False) -> int:
     if requires_vpn:
         print("[action] ВКЛЮЧИ ВПН")
-        print("[wait] pause 180 seconds before Telegram step...")
-        time.sleep(180)
+        print("[wait] pause 30 seconds before Telegram step...")
+        time.sleep(30)
 
     attempts = RETRY_ATTEMPTS + 1
     for attempt in range(1, attempts + 1):
