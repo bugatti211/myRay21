@@ -1,102 +1,194 @@
 #!/usr/bin/env python3
-from datetime import datetime
-import subprocess
-import sys
-import time
 from pathlib import Path
+import sys
+import subprocess
+import importlib.util
 
-try:
-    from src.project_config import env_int, logs_dir
-except ModuleNotFoundError:
-    from project_config import env_int, logs_dir
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
-RETRY_ATTEMPTS = env_int("RAY_STEP_RETRIES", 1, minimum=0)
-RETRY_SLEEP_SEC = env_int("RAY_STEP_RETRY_SLEEP_SEC", 8, minimum=0)
-
-
-def run_step(title: str, script: Path, project_root: Path, log_file, requires_vpn: bool = False) -> int:
-    if requires_vpn:
-        print("[action] ВКЛЮЧИ ВПН")
-        print("[wait] pause 30 seconds before Telegram step...")
-        time.sleep(30)
-
-    attempts = RETRY_ATTEMPTS + 1
-    for attempt in range(1, attempts + 1):
-        print(f"[step] {title}: {script} (attempt {attempt}/{attempts})")
-        proc = subprocess.Popen(
-            [sys.executable, str(script)],
-            cwd=str(project_root),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            msg = line.rstrip("\n")
-            print(msg)
-            log_file.write(msg + "\n")
-        proc.wait()
-        if proc.returncode == 0:
-            print(f"[ok] {title}")
-            return 0
-        print(f"[error] step failed: {title} (code={proc.returncode})")
-        if attempt < attempts:
-            print(f"[retry] {title} after {RETRY_SLEEP_SEC}s")
-            time.sleep(RETRY_SLEEP_SEC)
-    return 1
+_shared_tools_path = SRC / "pipeline_shared_tools.py"
+_shared_tools_spec = importlib.util.spec_from_file_location("pipeline_shared_tools", _shared_tools_path)
+if _shared_tools_spec is None or _shared_tools_spec.loader is None:
+    raise RuntimeError(f"Cannot load shared tools from: {_shared_tools_path}")
+_shared_tools = importlib.util.module_from_spec(_shared_tools_spec)
+_shared_tools_spec.loader.exec_module(_shared_tools)
+build_json_and_top10 = _shared_tools.build_json_and_top10
+extract_keys_from_top10 = _shared_tools.extract_keys_from_top10
 
 
-def main() -> int:
-    base = Path(__file__).resolve().parent
-    log_dir = logs_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    steps = [
-        ("parse", base / "src" / "parse_keys.py", False),
-        ("check", base / "src" / "check_keys.py", False),
-        ("rank_keys", base / "src" / "rank_keys.py", False),
-        ("build_desc_keys", base / "src" / "build_desc_keys.py", False),
-        ("write_git_from_desc_keys", base / "src" / "write_git_from_desc_keys.py", False),
-        ("send_ss_to_telegram", base / "src" / "send_ss_to_telegram.py", True),
-        ("git_commit_and_notify", base / "src" / "git_commit_and_notify.py", False),
+def ask(prompt: str, default: str) -> str:
+    value = input(f"{prompt} [{default}]: ").strip()
+    return value or default
+
+
+def default_top10_path() -> str:
+    root = Path("file/2TopLinksFromGit")
+    if root.exists():
+        matches = sorted(root.glob("*_top10.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if matches:
+            return str(matches[0])
+    return "file/2TopLinksFromGit/2026-05-11_top10.txt"
+
+
+def run_top10_only():
+    input_path = ask("Путь к файлу с проверенными подписками", "file/1AllLinksFromGit/default.txt")
+    output_dir = ask("Папка для json и top10", "file/2TopLinksFromGit")
+
+    result = build_json_and_top10(Path(input_path), Path(output_dir))
+    print(f"\nГотово: {result['json_path']}")
+    print(f"Готово: {result['top10_path']}")
+    print(f"Обработано подписок: {result['records']}")
+
+
+def run_keys_only():
+    top10_path = ask("Путь к top10 файлу", default_top10_path())
+    keys_dir = ask("Папка для файлов с ключами", "file/3KeysFromGit")
+
+    result = extract_keys_from_top10(Path(top10_path), Path(keys_dir))
+    print(f"\nГотово: {Path(keys_dir) / 'vless.txt'} ({result['vless_total']})")
+    print(f"Готово: {Path(keys_dir) / 'ss.txt'} ({result['ss_total']})")
+    print(f"Готово: {Path(keys_dir) / 'vless_RU.txt'} ({result['vless_ru']})")
+    print(f"Готово: {Path(keys_dir) / 'ss_RU.txt'} ({result['ss_ru']})")
+    if result["failed"]:
+        print("Не удалось скачать некоторые подписки:")
+        for url, error in result["failed"]:
+            print(f"- {url}: {error}")
+
+
+def run_ping_check():
+    vless_file = ask("Путь к файлу vless (без RU)", "file/3KeysFromGit/vless.txt")
+    vless_ru_file = ask("Путь к файлу vless_RU", "file/3KeysFromGit/vless_RU.txt")
+    ss_file = ask("Путь к файлу ss (без RU)", "file/3KeysFromGit/ss.txt")
+    ss_ru_file = ask("Путь к файлу ss_RU", "file/3KeysFromGit/ss_RU.txt")
+    xray_bin = ask("Путь к xray binary", "xrayFile/xray")
+    output_dir = ask("Папка для живых ключей", "file/4LiveKeys")
+    concurrency = ask("Параллельных проверок", "100")
+    timeout = ask("Таймаут на ключ (сек)", "12")
+    max_alive_vless = ask("Лимит живых vless", "1000")
+    max_alive_ss = ask("Лимит живых ss", "100")
+
+    cmd = [
+        "python3",
+        "src/ping_keys_with_xray.py",
+        "--vless-file",
+        vless_file,
+        "--vless-ru-file",
+        vless_ru_file,
+        "--ss-file",
+        ss_file,
+        "--ss-ru-file",
+        ss_ru_file,
+        "--xray-bin",
+        xray_bin,
+        "--output-dir",
+        output_dir,
+        "--concurrency",
+        concurrency,
+        "--timeout",
+        timeout,
+        "--max-alive-vless",
+        max_alive_vless,
+        "--max-alive-ss",
+        max_alive_ss,
+    ]
+    subprocess.run(cmd, check=True)
+
+def run_rerank_top_from_alive():
+    input_dir = ask("Папка с живыми ключами", "file/4LiveKeys")
+    output_dir = ask("Папка для top быстрых ключей", "file/5TopLiveKeys")
+    xray_bin = ask("Путь к xray binary", "xrayFile/xray")
+    concurrency = ask("Параллельных проверок", "100")
+    timeout = ask("Таймаут на ключ (сек)", "12")
+    runs = ask("Кол-во прогонов для ранжирования", "3")
+
+    cmd = [
+        "python3",
+        "src/rerank_ping_ok_keys.py",
+        "--input-dir",
+        input_dir,
+        "--output-dir",
+        output_dir,
+        "--xray-bin",
+        xray_bin,
+        "--concurrency",
+        concurrency,
+        "--timeout",
+        timeout,
+        "--runs",
+        runs,
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def run_rewrite_toplive_descriptions():
+    input_dir = ask("Папка с top ключами", "file/5TopLiveKeys")
+    file_glob = ask("Маска файлов", "*_ping_ok.txt")
+    channel = ask("Текст описания", "t.me/freekesha21")
+
+    cmd = [
+        "python3",
+        "src/rewrite_toplive_descriptions.py",
+        "--dir",
+        input_dir,
+        "--glob",
+        file_glob,
+        "--channel",
+        channel,
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def run_write_git_from_toplive():
+    cmd = ["python3", "src/write_git_publish_files.py"]
+    subprocess.run(cmd, check=True)
+
+
+def run_send_ss_to_telegram():
+    cmd = ["python3", "src/send_ss_to_telegram.py"]
+    subprocess.run(cmd, check=True)
+
+
+def run_git_commit_and_notify():
+    cmd = ["python3", "src/git_commit_push_and_notify.py"]
+    subprocess.run(cmd, check=True)
+
+
+def build_steps():
+    return [
+        ("Сформировать JSON + top10", run_top10_only),
+        ("Сформировать ключи из top10", run_keys_only),
+        ("Проверка ключей через xray (ping) и запись живых", run_ping_check),
+        ("3 прогона по живым ключам и отбор топ лучших", run_rerank_top_from_alive),
+        ("Переписать описания top ключей (канал + номер + флаг)", run_rewrite_toplive_descriptions),
+        ("Записать top live ключи в git файлы", run_write_git_from_toplive),
+        ("Отправить SS ключи в Telegram", run_send_ss_to_telegram),
+        ("Git commit + push + Telegram notify", run_git_commit_and_notify),
     ]
 
-    print("[info] available steps:")
-    for idx, (title, script, _) in enumerate(steps, start=1):
-        print(f"  {idx}. {title} ({script.name})")
 
-    start_idx = 0
-    while True:
-        raw = input(f"[input] enter step number to start with (1-{len(steps)}): ").strip()
-        if not raw.isdigit():
-            print("[error] please enter a valid number")
-            continue
-        num = int(raw)
-        if 1 <= num <= len(steps):
-            start_idx = num - 1
-            break
-        print(f"[error] number must be in range 1-{len(steps)}")
+def main():
+    steps = build_steps()
+    print("Выберите шаг, с которого начать:")
+    for i, (title, _) in enumerate(steps, start=1):
+        print(f"{i}. {title}")
 
-    print(f"[info] starting from step {start_idx + 1}: {steps[start_idx][0]}")
+    choice = input(f"Введите номер шага (1-{len(steps)}): ").strip()
+    if not choice.isdigit():
+        print("Неверный выбор")
+        sys.exit(1)
 
-    with log_path.open("w", encoding="utf-8") as log_file:
-        log_file.write(f"[start] {datetime.now().isoformat()}\n")
-        log_file.write(f"[info] retries={RETRY_ATTEMPTS} sleep={RETRY_SLEEP_SEC}s\n")
-        for title, script, requires_vpn in steps[start_idx:]:
-            if not script.exists():
-                print(f"[error] script not found: {script}")
-                log_file.write(f"[error] script not found: {script}\n")
-                return 1
-            code = run_step(title, script, base, log_file, requires_vpn=requires_vpn)
-            if code != 0:
-                print(f"[info] full log: {log_path}")
-                return code
+    start_idx = int(choice) - 1
+    if start_idx < 0 or start_idx >= len(steps):
+        print("Неверный выбор")
+        sys.exit(1)
 
-    print("[done] all steps completed")
-    print(f"[info] full log: {log_path}")
-    return 0
+    for i, (title, fn) in enumerate(steps[start_idx:], start=start_idx + 1):
+        print(f"\n[step {i}/{len(steps)}] {title}")
+        fn()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

@@ -94,7 +94,7 @@ def build_notify_text(updated_file: str) -> str:
         f"<code>{ordinary_url}</code>\n\n"
         "✅ Подписка для обхода обновлена\n"
         f"<code>{bypass_url}</code>\n\n"
-        "✅ Подписка с РУ ключами\n"
+        "✅ Подписка с RU ключами обновлена\n"
         f"<code>{ru_url}</code>"
     )
 
