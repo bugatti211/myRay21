@@ -13,9 +13,10 @@ import certifi
 
 
 # ===== Settings =====
-SOURCE_DIR = Path("file/desc_keys")
-FALLBACK_SOURCE_DIR = Path("file/deck_keys")
-SS_FILE = "ss.txt"
+PRIMARY_SOURCE_DIR = Path("file/5TopLiveKeys")
+FALLBACK_SOURCE_DIR = Path("file/4LiveKeys")
+LEGACY_SOURCE_DIR = Path("file/3KeysFromGit")
+SS_FILE = "ss_ping_ok.txt"
 ENV_FILE = Path(".env")
 TELEGRAM_BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 TELEGRAM_CHAT_ID_ENV = "TELEGRAM_CHAT_ID"
@@ -34,12 +35,15 @@ def iter_links(path: Path):
 
 
 def resolve_source_dir() -> Path:
-    if SOURCE_DIR.exists():
-        return SOURCE_DIR
+    if PRIMARY_SOURCE_DIR.exists():
+        return PRIMARY_SOURCE_DIR
     if FALLBACK_SOURCE_DIR.exists():
-        print(f"[warn] {SOURCE_DIR} not found, using {FALLBACK_SOURCE_DIR}")
+        print(f"[warn] {PRIMARY_SOURCE_DIR} not found, using {FALLBACK_SOURCE_DIR}")
         return FALLBACK_SOURCE_DIR
-    return SOURCE_DIR
+    if LEGACY_SOURCE_DIR.exists():
+        print(f"[warn] {PRIMARY_SOURCE_DIR} not found, using legacy {LEGACY_SOURCE_DIR}")
+        return LEGACY_SOURCE_DIR
+    return PRIMARY_SOURCE_DIR
 
 
 def load_dotenv(path: Path) -> Dict[str, str]:
@@ -80,9 +84,6 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> None:
 
 
 def build_message(day_num: int, seq_no: int, key: str) -> str:
-    # Requested format:
-    # #{today_day}{index}
-    # `key`
     tag = f"#{day_num}{seq_no}"
     safe_key = html.escape(key, quote=False)
     return f"{tag}\n<code>{safe_key}</code>"
@@ -101,6 +102,11 @@ def main() -> int:
 
     source_dir = resolve_source_dir()
     ss_path = source_dir / SS_FILE
+
+    # Legacy fallback for old structure.
+    if not ss_path.exists() and source_dir == LEGACY_SOURCE_DIR:
+        ss_path = source_dir / "ss.txt"
+
     if not ss_path.exists():
         print(f"[error] ss source file not found: {ss_path}")
         return 1
