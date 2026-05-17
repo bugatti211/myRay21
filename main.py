@@ -25,29 +25,70 @@ def ask(prompt: str, default: str) -> str:
 
 
 def default_top10_path() -> str:
-    root = Path("file/2TopLinksFromGit")
-    if root.exists():
-        matches = sorted(root.glob("*_top10.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if matches:
-            return str(matches[0])
-    return "file/2TopLinksFromGit/2026-05-11_top10.txt"
+    return "file/2TopLinksFromGit/default_top10.txt"
 
 
 def run_top10_only():
-    input_path = ask("Путь к файлу с проверенными подписками", "file/1AllLinksFromGit/default.txt")
-    output_dir = ask("Папка для json и top10", "file/2TopLinksFromGit")
+    input_path = "file/1AllLinksFromGit/default.txt"
+    whitelist_path = "file/1AllLinksFromGit/whiteList.txt"
+    output_dir = "file/2TopLinksFromGit"
 
-    result = build_json_and_top10(Path(input_path), Path(output_dir))
-    print(f"\nГотово: {result['json_path']}")
-    print(f"Готово: {result['top10_path']}")
-    print(f"Обработано подписок: {result['records']}")
+    default_result = build_json_and_top10(
+        Path(input_path),
+        Path(output_dir),
+        "default",
+    )
+    whitelist_result = build_json_and_top10(
+        Path(whitelist_path),
+        Path(output_dir),
+        "whiteList",
+    )
+    print(f"\n[default] Готово: {default_result['json_path']}")
+    print(f"[default] Готово: {default_result['top10_path']}")
+    print(f"[default] Обработано подписок: {default_result['records']}")
+    print(f"\n[whiteList] Готово: {whitelist_result['json_path']}")
+    print(f"[whiteList] Готово: {whitelist_result['top10_path']}")
+    print(f"[whiteList] Обработано подписок: {whitelist_result['records']}")
 
 
 def run_keys_only():
-    top10_path = ask("Путь к top10 файлу", default_top10_path())
-    keys_dir = ask("Папка для файлов с ключами", "file/3KeysFromGit")
+    default_top10 = Path("file/2TopLinksFromGit/default_top10.txt")
+    whitelist_top10 = Path("file/2TopLinksFromGit/whiteList_top10.txt")
+    keys_dir = "file/3KeysFromGit"
+    force_ru_sources = "file/1AllLinksFromGit/whiteList.txt"
 
-    result = extract_keys_from_top10(Path(top10_path), Path(keys_dir))
+    top10_lines = []
+    seen = set()
+    for path in [default_top10, whitelist_top10]:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            row = line.strip()
+            if not row or row in seen:
+                continue
+            seen.add(row)
+            top10_lines.append(row)
+
+    if not top10_lines:
+        fallback = Path(default_top10_path())
+        if fallback.exists():
+            for line in fallback.read_text(encoding="utf-8").splitlines():
+                row = line.strip()
+                if not row or row in seen:
+                    continue
+                seen.add(row)
+                top10_lines.append(row)
+        else:
+            raise FileNotFoundError("Не найдено top10 файлов для шага 2")
+
+    combined_top10 = Path("file/2TopLinksFromGit/_combined_top10.txt")
+    combined_top10.write_text("\n".join(top10_lines) + "\n", encoding="utf-8")
+
+    result = extract_keys_from_top10(
+        combined_top10,
+        Path(keys_dir),
+        Path(force_ru_sources),
+    )
     print(f"\nГотово: {Path(keys_dir) / 'vless.txt'} ({result['vless_total']})")
     print(f"Готово: {Path(keys_dir) / 'ss.txt'} ({result['ss_total']})")
     print(f"Готово: {Path(keys_dir) / 'vless_RU.txt'} ({result['vless_ru']})")
@@ -59,16 +100,16 @@ def run_keys_only():
 
 
 def run_ping_check():
-    vless_file = ask("Путь к файлу vless (без RU)", "file/3KeysFromGit/vless.txt")
-    vless_ru_file = ask("Путь к файлу vless_RU", "file/3KeysFromGit/vless_RU.txt")
-    ss_file = ask("Путь к файлу ss (без RU)", "file/3KeysFromGit/ss.txt")
-    ss_ru_file = ask("Путь к файлу ss_RU", "file/3KeysFromGit/ss_RU.txt")
-    xray_bin = ask("Путь к xray binary", "xrayFile/xray")
-    output_dir = ask("Папка для живых ключей", "file/4LiveKeys")
+    vless_file = "file/3KeysFromGit/vless.txt"
+    vless_ru_file = "file/3KeysFromGit/vless_RU.txt"
+    ss_file = "file/3KeysFromGit/ss.txt"
+    ss_ru_file = "file/3KeysFromGit/ss_RU.txt"
+    xray_bin = "xrayFile/xray"
+    output_dir = "file/4LiveKeys"
     concurrency = ask("Параллельных проверок", "100")
-    timeout = ask("Таймаут на ключ (сек)", "12")
-    max_alive_vless = ask("Лимит живых vless", "1000")
-    max_alive_ss = ask("Лимит живых ss", "100")
+    timeout = "12"
+    max_alive_vless = ask("Лимит живых vless (0 = без лимита)", "0")
+    max_alive_ss = ask("Лимит живых ss (0 = без лимита)", "0")
 
     cmd = [
         "python3",
@@ -97,11 +138,11 @@ def run_ping_check():
     subprocess.run(cmd, check=True)
 
 def run_rerank_top_from_alive():
-    input_dir = ask("Папка с живыми ключами", "file/4LiveKeys")
-    output_dir = ask("Папка для top быстрых ключей", "file/5TopLiveKeys")
-    xray_bin = ask("Путь к xray binary", "xrayFile/xray")
+    input_dir = "file/4LiveKeys"
+    output_dir = "file/5TopLiveKeys"
+    xray_bin = "xrayFile/xray"
     concurrency = ask("Параллельных проверок", "100")
-    timeout = ask("Таймаут на ключ (сек)", "12")
+    timeout = "12"
     runs = ask("Кол-во прогонов для ранжирования", "3")
 
     cmd = [
@@ -124,9 +165,9 @@ def run_rerank_top_from_alive():
 
 
 def run_rewrite_toplive_descriptions():
-    input_dir = ask("Папка с top ключами", "file/5TopLiveKeys")
-    file_glob = ask("Маска файлов", "*_ping_ok.txt")
-    channel = ask("Текст описания", "t.me/freekesha21")
+    input_dir = "file/5TopLiveKeys"
+    file_glob = "*_ping_ok.txt"
+    channel = "t.me/freekesha21"
 
     cmd = [
         "python3",

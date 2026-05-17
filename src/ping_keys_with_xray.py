@@ -341,6 +341,9 @@ async def main_async(args):
     ss_out.write_text("", encoding="utf-8")
     ss_ru_out.write_text("", encoding="utf-8")
 
+    max_alive_vless = args.max_alive_vless if args.max_alive_vless and args.max_alive_vless > 0 else None
+    max_alive_ss = args.max_alive_ss if args.max_alive_ss and args.max_alive_ss > 0 else None
+
     alive_vless = await run_checks(
         vless_keys,
         "vless",
@@ -349,7 +352,7 @@ async def main_async(args):
         args.timeout,
         args.base_port,
         vless_out,
-        args.max_alive_vless,
+        max_alive_vless,
     )
     alive_vless_ru = await run_checks(
         vless_ru_keys,
@@ -359,7 +362,7 @@ async def main_async(args):
         args.timeout,
         args.base_port + 20000,
         vless_ru_out,
-        args.max_alive_vless,
+        max_alive_vless,
     )
     alive_ss = await run_checks(
         ss_keys,
@@ -369,7 +372,7 @@ async def main_async(args):
         args.timeout,
         args.base_port + 40000,
         ss_out,
-        args.max_alive_ss,
+        max_alive_ss,
     )
     alive_ss_ru = await run_checks(
         ss_ru_keys,
@@ -379,7 +382,7 @@ async def main_async(args):
         args.timeout,
         args.base_port + 60000,
         ss_ru_out,
-        args.max_alive_ss,
+        max_alive_ss,
     )
 
     print(f"\nГотово: {vless_out} ({len(alive_vless)})")

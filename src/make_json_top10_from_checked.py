@@ -17,13 +17,28 @@ build_json_and_top10 = MODULE.build_json_and_top10
 def main():
     parser = argparse.ArgumentParser(description="Формирует JSON и top10 из проверенного файла подписок.")
     parser.add_argument("--input", default="file/1AllLinksFromGit/default.txt")
+    parser.add_argument("--whitelist-input", default="file/1AllLinksFromGit/whiteList.txt")
     parser.add_argument("--output-dir", default="file/2TopLinksFromGit")
+    parser.add_argument("--default-name", default="default")
+    parser.add_argument("--whitelist-name", default="whiteList")
     args = parser.parse_args()
 
-    result = build_json_and_top10(Path(args.input), Path(args.output_dir))
-    print(f"Готово: {result['json_path']}")
-    print(f"Готово: {result['top10_path']}")
-    print(f"Обработано подписок: {result['records']}")
+    default_result = build_json_and_top10(
+        Path(args.input),
+        Path(args.output_dir),
+        args.default_name,
+    )
+    whitelist_result = build_json_and_top10(
+        Path(args.whitelist_input),
+        Path(args.output_dir),
+        args.whitelist_name,
+    )
+    print(f"[default] Готово: {default_result['json_path']}")
+    print(f"[default] Готово: {default_result['top10_path']}")
+    print(f"[default] Обработано подписок: {default_result['records']}")
+    print(f"[whiteList] Готово: {whitelist_result['json_path']}")
+    print(f"[whiteList] Готово: {whitelist_result['top10_path']}")
+    print(f"[whiteList] Обработано подписок: {whitelist_result['records']}")
 
 
 if __name__ == "__main__":

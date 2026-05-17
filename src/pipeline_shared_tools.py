@@ -38,19 +38,26 @@ def parse_pairs(lines):
     return records
 
 
-def build_json_and_top10(input_path: Path, output_dir: Path):
+def build_json_and_top10(input_path: Path, output_dir: Path, name_suffix: str | None = None):
     if not input_path.exists():
         raise FileNotFoundError(f"Не найден входной файл: {input_path}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     lines = input_path.read_text(encoding="utf-8").splitlines()
     records = parse_pairs(lines)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    stamp = datetime.now().strftime("%Y-%m-%d")
-    json_path = output_dir / f"{stamp}.json"
-    top10_path = output_dir / f"{stamp}_top10.txt"
+    checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    base_name = name_suffix or "subs"
+    json_path = output_dir / f"{base_name}.json"
+    top10_path = output_dir / f"{base_name}_top10.txt"
 
-    json_path.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    payload = {
+        "checked_at": checked_at,
+        "source_file": str(input_path),
+        "subscriptions_total": len(records),
+        "subscriptions": records,
+    }
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     top10 = sorted(records, key=lambda x: x["alive"], reverse=True)[:10]
     top10_path.write_text("\n".join(item["url"] for item in top10) + "\n", encoding="utf-8")
 
@@ -60,6 +67,18 @@ def build_json_and_top10(input_path: Path, output_dir: Path):
 def read_top_urls(path: Path):
     lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
     return [line for line in lines if line and URL_RE.match(line)]
+
+
+def read_urls_from_pairs_file(path: Path):
+    if not path.exists():
+        return set()
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    urls = set()
+    for i in range(0, len(lines), 2):
+        url = lines[i]
+        if URL_RE.match(url):
+            urls.add(url)
+    return urls
 
 
 def fetch_lines(url: str):
@@ -85,8 +104,9 @@ def is_ru_key(key: str):
     return bool(RU_WORD_RE.search(desc))
 
 
-def extract_keys_from_top10(top10_path: Path, output_dir: Path):
+def extract_keys_from_top10(top10_path: Path, output_dir: Path, force_ru_sources_path: Path | None = None):
     urls = read_top_urls(top10_path)
+    force_ru_urls = read_urls_from_pairs_file(force_ru_sources_path) if force_ru_sources_path else set()
     vless_keys = []
     ss_keys = []
     vless_ru_keys = []
@@ -94,6 +114,7 @@ def extract_keys_from_top10(top10_path: Path, output_dir: Path):
     failed = []
 
     for url in urls:
+        force_ru = url in force_ru_urls
         try:
             lines = fetch_lines(url)
         except Exception as exc:
@@ -102,12 +123,12 @@ def extract_keys_from_top10(top10_path: Path, output_dir: Path):
 
         for line in lines:
             if line.startswith("vless://"):
-                if is_ru_key(line):
+                if force_ru or is_ru_key(line):
                     vless_ru_keys.append(line)
                 else:
                     vless_keys.append(line)
             elif line.startswith("ss://"):
-                if is_ru_key(line):
+                if force_ru or is_ru_key(line):
                     ss_ru_keys.append(line)
                 else:
                     ss_keys.append(line)
