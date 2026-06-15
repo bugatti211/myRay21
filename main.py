@@ -3,6 +3,8 @@ from pathlib import Path
 import sys
 import subprocess
 import importlib.util
+from datetime import datetime, timedelta
+import time
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
@@ -19,9 +21,45 @@ build_json_and_top10 = _shared_tools.build_json_and_top10
 extract_keys_from_top10 = _shared_tools.extract_keys_from_top10
 
 
-def ask(prompt: str, default: str) -> str:
-    value = input(f"{prompt} [{default}]: ").strip()
-    return value or default
+try:
+    import pipeline_config as config
+except ImportError:
+    config = None
+
+
+def config_value(name: str, default):
+    if config is None:
+        return default
+    return getattr(config, name, default)
+
+
+def config_str(name: str, default) -> str:
+    return str(config_value(name, default))
+
+
+def wait_until_configured_start_time():
+    start_time = config_value("START_TIME", None)
+    if start_time is None or str(start_time).strip() == "":
+        return
+
+    try:
+        hour_text, minute_text = str(start_time).strip().split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError
+    except ValueError:
+        print('Неверный START_TIME в pipeline_config.py, нужен формат "ЧЧ:ММ"')
+        sys.exit(1)
+
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+
+    wait_seconds = (target - now).total_seconds()
+    print(f"Жду до {target:%Y-%m-%d %H:%M} для запуска пайплайна")
+    time.sleep(wait_seconds)
 
 
 def default_top10_path() -> str:
@@ -56,6 +94,7 @@ def run_keys_only():
     whitelist_top10 = Path("file/2TopLinksFromGit/whiteList_top10.txt")
     keys_dir = "file/3KeysFromGit"
     force_ru_sources = "file/1AllLinksFromGit/whiteList.txt"
+    trojan_ru_sources = "file/2TopLinksFromGit/whiteList_top10.txt"
 
     top10_lines = []
     seen = set()
@@ -88,11 +127,11 @@ def run_keys_only():
         combined_top10,
         Path(keys_dir),
         Path(force_ru_sources),
+        Path(trojan_ru_sources),
     )
     print(f"\nГотово: {Path(keys_dir) / 'vless.txt'} ({result['vless_total']})")
     print(f"Готово: {Path(keys_dir) / 'ss.txt'} ({result['ss_total']})")
     print(f"Готово: {Path(keys_dir) / 'vless_RU.txt'} ({result['vless_ru']})")
-    print(f"Готово: {Path(keys_dir) / 'ss_RU.txt'} ({result['ss_ru']})")
     if result["failed"]:
         print("Не удалось скачать некоторые подписки:")
         for url, error in result["failed"]:
@@ -103,13 +142,12 @@ def run_ping_check():
     vless_file = "file/3KeysFromGit/vless.txt"
     vless_ru_file = "file/3KeysFromGit/vless_RU.txt"
     ss_file = "file/3KeysFromGit/ss.txt"
-    ss_ru_file = "file/3KeysFromGit/ss_RU.txt"
     xray_bin = "xrayFile/xray"
     output_dir = "file/4LiveKeys"
-    concurrency = ask("Параллельных проверок", "100")
-    timeout = "12"
-    max_alive_vless = ask("Лимит живых vless (0 = без лимита)", "0")
-    max_alive_ss = ask("Лимит живых ss (0 = без лимита)", "0")
+    concurrency = config_str("PING_CONCURRENCY", 100)
+    timeout = config_str("PING_TIMEOUT", 12)
+    max_alive_vless = config_str("MAX_ALIVE_VLESS", 0)
+    max_alive_ss = config_str("MAX_ALIVE_SS", 0)
 
     cmd = [
         "python3",
@@ -120,8 +158,6 @@ def run_ping_check():
         vless_ru_file,
         "--ss-file",
         ss_file,
-        "--ss-ru-file",
-        ss_ru_file,
         "--xray-bin",
         xray_bin,
         "--output-dir",
@@ -141,9 +177,9 @@ def run_rerank_top_from_alive():
     input_dir = "file/4LiveKeys"
     output_dir = "file/5TopLiveKeys"
     xray_bin = "xrayFile/xray"
-    concurrency = ask("Параллельных проверок", "100")
-    timeout = "12"
-    runs = ask("Кол-во прогонов для ранжирования", "3")
+    concurrency = config_str("RERANK_CONCURRENCY", 100)
+    timeout = config_str("RERANK_TIMEOUT", 12)
+    runs = config_str("RERANK_RUNS", 3)
 
     cmd = [
         "python3",
@@ -210,8 +246,7 @@ def build_steps():
     ]
 
 
-def main():
-    steps = build_steps()
+def ask_manual_start_step(steps):
     print("Выберите шаг, с которого начать:")
     for i, (title, _) in enumerate(steps, start=1):
         print(f"{i}. {title}")
@@ -221,10 +256,54 @@ def main():
         print("Неверный выбор")
         sys.exit(1)
 
-    start_idx = int(choice) - 1
+    return int(choice) - 1
+
+
+def config_start_step_idx(steps):
+    start_step = config_value("START_STEP", None)
+    if start_step is None:
+        return ask_manual_start_step(steps)
+
+    try:
+        return int(start_step) - 1
+    except (TypeError, ValueError):
+        print("Неверный START_STEP в pipeline_config.py")
+        sys.exit(1)
+
+
+def ask_run_mode():
+    print("Выберите режим запуска:")
+    print("1. Запустить прямо сейчас и выбрать шаг вручную")
+    print("2. Запустить по данным из pipeline_config.py")
+
+    choice = input("Введите 1 или 2: ").strip()
+    if choice == "1":
+        return "manual_now"
+    if choice == "2":
+        return "config"
+
+    print("Неверный выбор")
+    sys.exit(1)
+
+
+def main():
+    steps = build_steps()
+    run_mode = ask_run_mode()
+
+    if run_mode == "manual_now":
+        start_idx = ask_manual_start_step(steps)
+    else:
+        wait_until_configured_start_time()
+        start_idx = config_start_step_idx(steps)
+
+    print("Шаги пайплайна:")
+    for i, (title, _) in enumerate(steps, start=1):
+        print(f"{i}. {title}")
     if start_idx < 0 or start_idx >= len(steps):
         print("Неверный выбор")
         sys.exit(1)
+
+    print(f"\nСтартую с шага {start_idx + 1}")
 
     for i, (title, fn) in enumerate(steps[start_idx:], start=start_idx + 1):
         print(f"\n[step {i}/{len(steps)}] {title}")

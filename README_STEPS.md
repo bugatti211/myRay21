@@ -2,6 +2,10 @@
 
 Ниже шаги в порядке запуска из `main.py`.
 
+При запуске `python3 main.py` сначала выбирается режим:
+- `1` — запустить прямо сейчас и выбрать стартовый шаг вручную.
+- `2` — запустить по данным из `pipeline_config.py`: дождаться `START_TIME` и начать с `START_STEP`.
+
 1. Сформировать JSON + top10
 - Скрипт: `main.py` (функция `run_top10_only`)
 - Логика: `src/pipeline_shared_tools.py` (`build_json_and_top10`)

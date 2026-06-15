@@ -7,7 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from ping_keys_with_xray import TEST_URLS, build_config, parse_ss, parse_vless
+from ping_keys_with_xray import TEST_URLS, build_config, parse_ss, parse_trojan, parse_vless
 
 
 def read_keys(path: Path):
@@ -21,7 +21,7 @@ def read_keys(path: Path):
             continue
         if key in seen:
             continue
-        if key.startswith("ss://") or key.startswith("vless://"):
+        if key.startswith("ss://") or key.startswith("vless://") or key.startswith("trojan://"):
             seen.add(key)
             out.append(key)
     return out
@@ -32,12 +32,19 @@ def key_kind(key: str):
         return "ss"
     if key.startswith("vless://"):
         return "vless"
+    if key.startswith("trojan://"):
+        return "trojan"
     return "unknown"
 
 
 async def probe_once(key: str, xray_bin: Path, socks_port: int, timeout: float):
     try:
-        outbound = parse_vless(key) if key.startswith("vless://") else parse_ss(key)
+        if key.startswith("vless://"):
+            outbound = parse_vless(key)
+        elif key.startswith("trojan://"):
+            outbound = parse_trojan(key)
+        else:
+            outbound = parse_ss(key)
     except Exception:
         return None
 
@@ -161,24 +168,27 @@ async def rerank_file(path: Path, out_dir: Path, xray_bin: Path, concurrency: in
         [x for x in alive if key_kind(x["key"]) == "ss"],
         key=lambda x: (-x["success_runs"], x["score_ms"], x["min_ms"]),
     )
-    vless_ranked = sorted(
-        [x for x in alive if key_kind(x["key"]) == "vless"],
+    vless_like_ranked = sorted(
+        [x for x in alive if key_kind(x["key"]) in {"vless", "trojan"}],
         key=lambda x: (-x["success_runs"], x["score_ms"], x["min_ms"]),
     )
 
     selected = []
-    selected.extend(vless_ranked[:300])
+    selected.extend(vless_like_ranked[:300])
     selected.extend(ss_ranked[:10])
 
     # If file contains only one protocol, keep natural order for that protocol.
-    selected_sorted = sorted(selected, key=lambda x: (0 if key_kind(x["key"]) == "vless" else 1, -x["success_runs"], x["score_ms"], x["min_ms"]))
+    selected_sorted = sorted(
+        selected,
+        key=lambda x: (0 if key_kind(x["key"]) in {"vless", "trojan"} else 1, -x["success_runs"], x["score_ms"], x["min_ms"]),
+    )
     out_keys = [x["key"] for x in selected_sorted]
 
     out_path = out_dir / path.name
     out_path.write_text("\n".join(out_keys) + ("\n" if out_keys else ""), encoding="utf-8")
 
     print(
-        f"[{path.name}] alive={len(alive)}, vless_top={min(300, len(vless_ranked))}, "
+        f"[{path.name}] alive={len(alive)}, vless_trojan_top={min(300, len(vless_like_ranked))}, "
         f"ss_top={min(10, len(ss_ranked))} -> {out_path}"
     )
 

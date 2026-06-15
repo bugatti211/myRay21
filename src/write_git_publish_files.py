@@ -14,7 +14,6 @@ GIT_DIR = Path("git")
 VLESS_SOURCE = "vless_ping_ok.txt"
 SS_SOURCE = "ss_ping_ok.txt"
 VLESS_RU_SOURCE = "vless_RU_ping_ok.txt"
-SS_RU_SOURCE = "ss_RU_ping_ok.txt"
 
 WHITE_KEYS_TARGET = "WhiteKeys"
 RU_OTHER_TARGET = "RU_other"
@@ -91,6 +90,12 @@ def dedupe_keep_order(rows: List[str]) -> List[str]:
         seen.add(row)
         out.append(row)
     return out
+
+
+def prioritize_vless(rows: List[str]) -> List[str]:
+    vless_rows = [row for row in rows if row.startswith("vless://")]
+    other_rows = [row for row in rows if not row.startswith("vless://")]
+    return vless_rows + other_rows
 
 
 def extract_flag_from_text(text: str) -> str:
@@ -185,11 +190,10 @@ def main() -> int:
     # RU_other should contain remaining RU keys that were not selected into WhiteKeys.
     live_dir = FALLBACK_SOURCE_DIR if FALLBACK_SOURCE_DIR.exists() else top_dir
     ru_vless_live = load_rows(live_dir / VLESS_RU_SOURCE)
-    ru_ss_live = load_rows(live_dir / SS_RU_SOURCE)
 
     ordinary_rows = dedupe_keep_order(non_ru_vless)
-    white_rows = dedupe_keep_order(ru_vless_top)
-    ru_pool_rows = dedupe_keep_order(ru_vless_live + ru_ss_live)
+    white_rows = prioritize_vless(dedupe_keep_order(ru_vless_top))
+    ru_pool_rows = dedupe_keep_order(ru_vless_live)
     white_set = set(white_rows)
     ru_rows_raw = [row for row in ru_pool_rows if row not in white_set]
     ru_rows = [rewrite_desc(row, i + 1, CHANNEL_TEXT) for i, row in enumerate(ru_rows_raw)]

@@ -14,13 +14,13 @@ TEST_URLS = [
 ]
 
 
-def read_keys(path: Path, prefix: str):
+def read_keys(path: Path, prefixes):
     if not path.exists():
         return []
     out = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line.startswith(prefix):
+        if any(line.startswith(prefix) for prefix in prefixes):
             out.append(line)
     return out
 
@@ -178,6 +178,79 @@ def parse_ss(uri: str):
     }
 
 
+def parse_trojan(uri: str):
+    p = urlparse(uri)
+    qs = parse_qs(p.query)
+    password = unquote(p.username or "")
+    host = p.hostname
+    port = p.port
+    if not password or not host or not port:
+        raise ValueError("bad trojan uri")
+
+    outbound = {
+        "protocol": "trojan",
+        "settings": {
+            "servers": [
+                {
+                    "address": host,
+                    "port": port,
+                    "password": password,
+                }
+            ]
+        },
+        "streamSettings": {},
+    }
+
+    network = (qs.get("type", ["tcp"])[0] or "tcp").strip().lower()
+    security = (qs.get("security", ["tls"])[0] or "tls").strip().lower()
+    if security in {"false", "off"}:
+        security = "none"
+    if network == "raw":
+        network = "tcp"
+    outbound["streamSettings"]["network"] = network
+    outbound["streamSettings"]["security"] = security
+
+    sni = qs.get("sni", [""])[0] or qs.get("servername", [""])[0] or host
+    alpn = qs.get("alpn", [""])[0]
+    fp = qs.get("fp", [""])[0]
+
+    insecure_raw = (
+        qs.get("allowInsecure", [""])[0]
+        or qs.get("insecure", [""])[0]
+        or qs.get("skip-cert-verify", [""])[0]
+    )
+    insecure = str(insecure_raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    if security == "tls":
+        tls = {"allowInsecure": insecure}
+        if sni:
+            tls["serverName"] = sni
+        if fp:
+            tls["fingerprint"] = fp
+        if alpn:
+            tls["alpn"] = [x for x in alpn.split(",") if x]
+        outbound["streamSettings"]["tlsSettings"] = tls
+
+    if network == "ws":
+        path = qs.get("path", ["/"])[0] or "/"
+        host_header = qs.get("host", [""])[0]
+        ws = {"path": path}
+        if host_header:
+            ws["headers"] = {"Host": host_header}
+        outbound["streamSettings"]["wsSettings"] = ws
+    elif network == "grpc":
+        service = qs.get("serviceName", [""])[0]
+        mode = qs.get("mode", [""])[0]
+        grpc = {}
+        if service:
+            grpc["serviceName"] = service
+        if mode == "gun":
+            grpc["multiMode"] = False
+        outbound["streamSettings"]["grpcSettings"] = grpc
+
+    return outbound
+
+
 def build_config(outbound: dict, socks_port: int):
     return {
         "log": {"loglevel": "warning"},
@@ -198,7 +271,14 @@ def build_config(outbound: dict, socks_port: int):
 
 async def check_one(key: str, kind: str, xray_bin: Path, socks_port: int, timeout: float):
     try:
-        outbound = parse_vless(key) if kind.startswith("vless") else parse_ss(key)
+        if key.startswith("vless://"):
+            outbound = parse_vless(key)
+        elif key.startswith("ss://"):
+            outbound = parse_ss(key)
+        elif key.startswith("trojan://"):
+            outbound = parse_trojan(key)
+        else:
+            return False
     except Exception:
         return False
 
@@ -318,28 +398,24 @@ async def main_async(args):
     if not xray_bin.exists():
         raise FileNotFoundError(f"Не найден xray: {xray_bin}")
 
-    vless_keys = read_keys(Path(args.vless_file), "vless://")
-    vless_ru_keys = read_keys(Path(args.vless_ru_file), "vless://")
-    ss_keys = read_keys(Path(args.ss_file), "ss://")
-    ss_ru_keys = read_keys(Path(args.ss_ru_file), "ss://")
+    vless_keys = read_keys(Path(args.vless_file), ("vless://",))
+    vless_ru_keys = read_keys(Path(args.vless_ru_file), ("vless://", "trojan://"))
+    ss_keys = read_keys(Path(args.ss_file), ("ss://",))
 
     print(f"vless ключей: {len(vless_keys)}")
     print(f"vless_RU ключей: {len(vless_ru_keys)}")
     print(f"ss ключей: {len(ss_keys)}")
-    print(f"ss_RU ключей: {len(ss_ru_keys)}")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     vless_out = out_dir / "vless_ping_ok.txt"
     vless_ru_out = out_dir / "vless_RU_ping_ok.txt"
     ss_out = out_dir / "ss_ping_ok.txt"
-    ss_ru_out = out_dir / "ss_RU_ping_ok.txt"
 
     # Reset output files for a new run; then append alive keys during checks.
     vless_out.write_text("", encoding="utf-8")
     vless_ru_out.write_text("", encoding="utf-8")
     ss_out.write_text("", encoding="utf-8")
-    ss_ru_out.write_text("", encoding="utf-8")
 
     max_alive_vless = args.max_alive_vless if args.max_alive_vless and args.max_alive_vless > 0 else None
     max_alive_ss = args.max_alive_ss if args.max_alive_ss and args.max_alive_ss > 0 else None
@@ -374,21 +450,10 @@ async def main_async(args):
         ss_out,
         max_alive_ss,
     )
-    alive_ss_ru = await run_checks(
-        ss_ru_keys,
-        "ss_RU",
-        xray_bin,
-        args.concurrency,
-        args.timeout,
-        args.base_port + 60000,
-        ss_ru_out,
-        max_alive_ss,
-    )
 
     print(f"\nГотово: {vless_out} ({len(alive_vless)})")
     print(f"Готово: {vless_ru_out} ({len(alive_vless_ru)})")
     print(f"Готово: {ss_out} ({len(alive_ss)})")
-    print(f"Готово: {ss_ru_out} ({len(alive_ss_ru)})")
 
 
 def main():
@@ -396,7 +461,6 @@ def main():
     parser.add_argument("--vless-file", default="file/3KeysFromGit/vless.txt")
     parser.add_argument("--vless-ru-file", default="file/3KeysFromGit/vless_RU.txt")
     parser.add_argument("--ss-file", default="file/3KeysFromGit/ss.txt")
-    parser.add_argument("--ss-ru-file", default="file/3KeysFromGit/ss_RU.txt")
     parser.add_argument("--xray-bin", default="xrayFile/xray")
     parser.add_argument("--output-dir", default="file/4LiveKeys")
     parser.add_argument("--concurrency", type=int, default=30)

@@ -81,6 +81,13 @@ def read_urls_from_pairs_file(path: Path):
     return urls
 
 
+def read_urls_from_list_file(path: Path):
+    if not path.exists():
+        return set()
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+    return {line for line in lines if line and URL_RE.match(line)}
+
+
 def fetch_lines(url: str):
     try:
         with urlopen(url, timeout=30) as response:
@@ -104,17 +111,23 @@ def is_ru_key(key: str):
     return bool(RU_WORD_RE.search(desc))
 
 
-def extract_keys_from_top10(top10_path: Path, output_dir: Path, force_ru_sources_path: Path | None = None):
+def extract_keys_from_top10(
+    top10_path: Path,
+    output_dir: Path,
+    force_ru_sources_path: Path | None = None,
+    trojan_ru_sources_path: Path | None = None,
+):
     urls = read_top_urls(top10_path)
     force_ru_urls = read_urls_from_pairs_file(force_ru_sources_path) if force_ru_sources_path else set()
+    trojan_ru_urls = read_urls_from_list_file(trojan_ru_sources_path) if trojan_ru_sources_path else set()
     vless_keys = []
     ss_keys = []
     vless_ru_keys = []
-    ss_ru_keys = []
     failed = []
 
     for url in urls:
         force_ru = url in force_ru_urls
+        allow_trojan_ru = url in trojan_ru_urls
         try:
             lines = fetch_lines(url)
         except Exception as exc:
@@ -128,16 +141,16 @@ def extract_keys_from_top10(top10_path: Path, output_dir: Path, force_ru_sources
                 else:
                     vless_keys.append(line)
             elif line.startswith("ss://"):
-                if force_ru or is_ru_key(line):
-                    ss_ru_keys.append(line)
-                else:
+                if not (force_ru or is_ru_key(line)):
                     ss_keys.append(line)
+            elif line.startswith("trojan://"):
+                if allow_trojan_ru:
+                    vless_ru_keys.append(line)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "vless.txt").write_text("\n".join(vless_keys) + ("\n" if vless_keys else ""), encoding="utf-8")
     (output_dir / "ss.txt").write_text("\n".join(ss_keys) + ("\n" if ss_keys else ""), encoding="utf-8")
     (output_dir / "vless_RU.txt").write_text("\n".join(vless_ru_keys) + ("\n" if vless_ru_keys else ""), encoding="utf-8")
-    (output_dir / "ss_RU.txt").write_text("\n".join(ss_ru_keys) + ("\n" if ss_ru_keys else ""), encoding="utf-8")
 
     return {
         "urls_total": len(urls),
@@ -145,5 +158,4 @@ def extract_keys_from_top10(top10_path: Path, output_dir: Path, force_ru_sources
         "vless_total": len(vless_keys),
         "ss_total": len(ss_keys),
         "vless_ru": len(vless_ru_keys),
-        "ss_ru": len(ss_ru_keys),
     }

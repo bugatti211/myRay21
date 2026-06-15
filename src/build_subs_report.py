@@ -85,7 +85,6 @@ def extract_and_split_keys(top10_path: Path, output_dir: Path):
     vless_keys = []
     ss_keys = []
     vless_ru_keys = []
-    ss_ru_keys = []
     failed = []
 
     for url in urls:
@@ -102,16 +101,13 @@ def extract_and_split_keys(top10_path: Path, output_dir: Path):
                 else:
                     vless_keys.append(line)
             elif line.startswith("ss://"):
-                if is_ru_key(line):
-                    ss_ru_keys.append(line)
-                else:
+                if not is_ru_key(line):
                     ss_keys.append(line)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "vless.txt").write_text("\n".join(vless_keys) + ("\n" if vless_keys else ""), encoding="utf-8")
     (output_dir / "ss.txt").write_text("\n".join(ss_keys) + ("\n" if ss_keys else ""), encoding="utf-8")
     (output_dir / "vless_RU.txt").write_text("\n".join(vless_ru_keys) + ("\n" if vless_ru_keys else ""), encoding="utf-8")
-    (output_dir / "ss_RU.txt").write_text("\n".join(ss_ru_keys) + ("\n" if ss_ru_keys else ""), encoding="utf-8")
 
     return {
         "urls_total": len(urls),
@@ -119,7 +115,6 @@ def extract_and_split_keys(top10_path: Path, output_dir: Path):
         "vless_total": len(vless_keys),
         "ss_total": len(ss_keys),
         "vless_ru": len(vless_ru_keys),
-        "ss_ru": len(ss_ru_keys),
     }
 
 
@@ -179,7 +174,6 @@ def main():
     print(f"Готово: {Path(args.keys_dir) / 'vless.txt'} ({keys_stats['vless_total']})")
     print(f"Готово: {Path(args.keys_dir) / 'ss.txt'} ({keys_stats['ss_total']})")
     print(f"Готово: {Path(args.keys_dir) / 'vless_RU.txt'} ({keys_stats['vless_ru']})")
-    print(f"Готово: {Path(args.keys_dir) / 'ss_RU.txt'} ({keys_stats['ss_ru']})")
     if keys_stats["failed"]:
         print("Не удалось скачать некоторые подписки:")
         for url, error in keys_stats["failed"]:
