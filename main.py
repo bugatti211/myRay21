@@ -4,6 +4,7 @@ import sys
 import subprocess
 import importlib.util
 from datetime import datetime, timedelta
+from tempfile import NamedTemporaryFile
 import time
 
 ROOT = Path(__file__).resolve().parent
@@ -120,15 +121,15 @@ def run_keys_only():
         else:
             raise FileNotFoundError("Не найдено top10 файлов для шага 2")
 
-    combined_top10 = Path("file/2TopLinksFromGit/_combined_top10.txt")
-    combined_top10.write_text("\n".join(top10_lines) + "\n", encoding="utf-8")
-
-    result = extract_keys_from_top10(
-        combined_top10,
-        Path(keys_dir),
-        Path(force_ru_sources),
-        Path(trojan_ru_sources),
-    )
+    with NamedTemporaryFile("w", encoding="utf-8", suffix="_top10.txt") as tmp:
+        tmp.write("\n".join(top10_lines) + "\n")
+        tmp.flush()
+        result = extract_keys_from_top10(
+            Path(tmp.name),
+            Path(keys_dir),
+            Path(force_ru_sources),
+            Path(trojan_ru_sources),
+        )
     print(f"\nГотово: {Path(keys_dir) / 'vless.txt'} ({result['vless_total']})")
     print(f"Готово: {Path(keys_dir) / 'ss.txt'} ({result['ss_total']})")
     print(f"Готово: {Path(keys_dir) / 'vless_RU.txt'} ({result['vless_ru']})")

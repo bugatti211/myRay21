@@ -4,7 +4,7 @@ import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 from urllib.request import urlopen
 
 STATS_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*$")
@@ -38,6 +38,77 @@ def parse_pairs(lines):
     return records
 
 
+def subscription_source_key(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    parts = [part for part in parsed.path.split("/") if part]
+
+    if host == "raw.githubusercontent.com" and len(parts) >= 2:
+        return f"github:{parts[0]}/{parts[1]}".lower()
+    if host.endswith("github.com") and len(parts) >= 2:
+        return f"github:{parts[0]}/{parts[1]}".lower()
+    if host.endswith("gitverse.ru") and "repos" in parts:
+        repos_index = parts.index("repos")
+        if len(parts) > repos_index + 2:
+            return f"gitverse:{parts[repos_index + 1]}/{parts[repos_index + 2]}".lower()
+    return host
+
+
+def subscription_score(record):
+    total = record["total"]
+    unique = record["unique"]
+    alive = record["alive"]
+    alive_rate = alive / unique if unique else 0
+    unique_rate = unique / total if total else 0
+    noise_rate = 1 - unique_rate if total else 1
+
+    return (
+        alive * 1_000
+        + alive_rate * 300
+        + unique_rate * 100
+        - noise_rate * 50
+    )
+
+
+def select_top_subscriptions(records, limit=10, max_per_source=2):
+    candidates = [
+        record
+        for record in records
+        if record["alive"] > 0 and record["unique"] > 0
+    ]
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            subscription_score(item),
+            item["alive"],
+            item["unique"],
+        ),
+        reverse=True,
+    )
+
+    selected = []
+    selected_urls = set()
+    source_counts = {}
+    for record in ranked:
+        source = subscription_source_key(record["url"])
+        if source_counts.get(source, 0) >= max_per_source:
+            continue
+        selected.append(record)
+        selected_urls.add(record["url"])
+        source_counts[source] = source_counts.get(source, 0) + 1
+        if len(selected) >= limit:
+            return selected
+
+    for record in ranked:
+        if record["url"] in selected_urls:
+            continue
+        selected.append(record)
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
 def build_json_and_top10(input_path: Path, output_dir: Path, name_suffix: str | None = None):
     if not input_path.exists():
         raise FileNotFoundError(f"Не найден входной файл: {input_path}")
@@ -58,7 +129,7 @@ def build_json_and_top10(input_path: Path, output_dir: Path, name_suffix: str | 
         "subscriptions": records,
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    top10 = sorted(records, key=lambda x: x["alive"], reverse=True)[:10]
+    top10 = select_top_subscriptions(records)
     top10_path.write_text("\n".join(item["url"] for item in top10) + "\n", encoding="utf-8")
 
     return {"json_path": json_path, "top10_path": top10_path, "records": len(records)}
