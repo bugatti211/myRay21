@@ -400,11 +400,14 @@ async def main_async(args):
 
     vless_keys = read_keys(Path(args.vless_file), ("vless://",))
     vless_ru_keys = read_keys(Path(args.vless_ru_file), ("vless://", "trojan://"))
-    ss_keys = read_keys(Path(args.ss_file), ("ss://",))
+    ss_keys = [] if args.skip_ss else read_keys(Path(args.ss_file), ("ss://",))
 
     print(f"vless ключей: {len(vless_keys)}")
     print(f"vless_RU ключей: {len(vless_ru_keys)}")
-    print(f"ss ключей: {len(ss_keys)}")
+    if args.skip_ss:
+        print("ss ключи: пропущены")
+    else:
+        print(f"ss ключей: {len(ss_keys)}")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -440,20 +443,26 @@ async def main_async(args):
         vless_ru_out,
         max_alive_vless,
     )
-    alive_ss = await run_checks(
-        ss_keys,
-        "ss",
-        xray_bin,
-        args.concurrency,
-        args.timeout,
-        args.base_port + 40000,
-        ss_out,
-        max_alive_ss,
-    )
+    if args.skip_ss:
+        alive_ss = []
+    else:
+        alive_ss = await run_checks(
+            ss_keys,
+            "ss",
+            xray_bin,
+            args.concurrency,
+            args.timeout,
+            args.base_port + 40000,
+            ss_out,
+            max_alive_ss,
+        )
 
     print(f"\nГотово: {vless_out} ({len(alive_vless)})")
     print(f"Готово: {vless_ru_out} ({len(alive_vless_ru)})")
-    print(f"Готово: {ss_out} ({len(alive_ss)})")
+    if args.skip_ss:
+        print(f"Готово: {ss_out} (0, ss пропущены)")
+    else:
+        print(f"Готово: {ss_out} ({len(alive_ss)})")
 
 
 def main():
@@ -468,6 +477,7 @@ def main():
     parser.add_argument("--base-port", type=int, default=10000)
     parser.add_argument("--max-alive-vless", type=int, default=1000)
     parser.add_argument("--max-alive-ss", type=int, default=100)
+    parser.add_argument("--skip-ss", action="store_true", help="Не читать и не проверять ss:// ключи.")
     args = parser.parse_args()
 
     asyncio.run(main_async(args))

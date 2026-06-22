@@ -4,6 +4,7 @@ import os
 import ssl
 import subprocess
 import urllib.request
+import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -100,21 +101,28 @@ def build_notify_text(updated_file: str) -> str:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Git commit + push и опциональное Telegram-уведомление.")
+    parser.add_argument("--no-notify", action="store_true", help="Сделать commit + push без Telegram-уведомления.")
+    args = parser.parse_args()
+
     if not GIT_DIR.exists():
         print(f"[error] git dir not found: {GIT_DIR}")
         return 1
 
-    dotenv_values = load_dotenv(ENV_FILE)
-    token = os.getenv(TELEGRAM_BOT_TOKEN_ENV) or dotenv_values.get(TELEGRAM_BOT_TOKEN_ENV, "")
-    chat_id = os.getenv(TELEGRAM_CHAT_ID_ENV) or dotenv_values.get(TELEGRAM_CHAT_ID_ENV, "")
-    token = token.strip()
-    chat_id = chat_id.strip()
-    if not token or not chat_id:
-        print(
-            f"[error] telegram creds not found; set env or {ENV_FILE} "
-            f"({TELEGRAM_BOT_TOKEN_ENV}, {TELEGRAM_CHAT_ID_ENV})"
-        )
-        return 1
+    token = ""
+    chat_id = ""
+    if not args.no_notify:
+        dotenv_values = load_dotenv(ENV_FILE)
+        token = os.getenv(TELEGRAM_BOT_TOKEN_ENV) or dotenv_values.get(TELEGRAM_BOT_TOKEN_ENV, "")
+        chat_id = os.getenv(TELEGRAM_CHAT_ID_ENV) or dotenv_values.get(TELEGRAM_CHAT_ID_ENV, "")
+        token = token.strip()
+        chat_id = chat_id.strip()
+        if not token or not chat_id:
+            print(
+                f"[error] telegram creds not found; set env or {ENV_FILE} "
+                f"({TELEGRAM_BOT_TOKEN_ENV}, {TELEGRAM_CHAT_ID_ENV})"
+            )
+            return 1
 
     status = run_git(["status", "--porcelain"])
     if status.returncode != 0:
@@ -139,6 +147,10 @@ def main() -> int:
     if push_res.returncode != 0:
         print(f"[error] git push failed: {push_res.stderr.strip()}")
         return 1
+
+    if args.no_notify:
+        print("[done] commit + push complete")
+        return 0
 
     updated_day_file = next_day_filename(datetime.now())
     text = build_notify_text(updated_file=updated_day_file)

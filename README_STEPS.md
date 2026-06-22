@@ -5,6 +5,7 @@
 При запуске `python3 main.py` сначала выбирается режим:
 - `1` — запустить прямо сейчас и выбрать стартовый шаг вручную.
 - `2` — запустить по данным из `pipeline_config.py`: дождаться `START_TIME` и начать с `START_STEP`.
+- `3` — VLESS-only по данным из `pipeline_config.py`: пропустить SS-ключи, собрать VLESS-подписки, сделать `git commit + push` без Telegram-уведомлений.
 
 1. Сформировать JSON + top10
 - Скрипт: `main.py` (функция `run_top10_only`)
@@ -31,6 +32,12 @@
 
 8. Git commit + push + Telegram notify
 - Скрипт: `src/git_commit_push_and_notify.py`
+
+## VLESS-only без Telegram
+Режим `3` использует тот же порядок пайплайна, но:
+- на шаге ping передает `--skip-ss`, поэтому `ss://` ключи не проверяются;
+- шаг отправки SS в Telegram не запускается;
+- финальный шаг запускает `src/git_commit_push_and_notify.py --no-notify`, поэтому выполняется только `git commit + push`.
 
 ## Дополнительные утилиты
 - `src/make_json_top10_from_checked.py` — CLI-утилита для шага 1.

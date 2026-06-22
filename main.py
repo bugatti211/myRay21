@@ -138,7 +138,7 @@ def run_keys_only():
             print(f"- {url}: {error}")
 
 
-def run_ping_check():
+def run_ping_check(skip_ss=False):
     vless_file = "file/3KeysFromGit/vless.txt"
     vless_ru_file = "file/3KeysFromGit/vless_RU.txt"
     ss_file = "file/3KeysFromGit/ss.txt"
@@ -171,9 +171,11 @@ def run_ping_check():
         "--max-alive-ss",
         max_alive_ss,
     ]
+    if skip_ss:
+        cmd.append("--skip-ss")
     subprocess.run(cmd, check=True)
 
-def run_rerank_top_from_alive():
+def run_rerank_top_from_alive(glob="*_ping_ok.txt"):
     input_dir = "file/4LiveKeys"
     output_dir = "file/5TopLiveKeys"
     xray_bin = "xrayFile/xray"
@@ -188,6 +190,8 @@ def run_rerank_top_from_alive():
         input_dir,
         "--output-dir",
         output_dir,
+        "--glob",
+        glob,
         "--xray-bin",
         xray_bin,
         "--concurrency",
@@ -233,7 +237,23 @@ def run_git_commit_and_notify():
     subprocess.run(cmd, check=True)
 
 
-def build_steps():
+def run_git_commit_push_no_notify():
+    cmd = ["python3", "src/git_commit_push_and_notify.py", "--no-notify"]
+    subprocess.run(cmd, check=True)
+
+
+def build_steps(vless_only_no_tg=False):
+    if vless_only_no_tg:
+        return [
+            ("Сформировать JSON + top10", run_top10_only),
+            ("Сформировать ключи из top10", run_keys_only),
+            ("Проверка VLESS ключей через xray (ping) и запись живых", lambda: run_ping_check(skip_ss=True)),
+            ("3 прогона по живым VLESS ключам и отбор топ лучших", run_rerank_top_from_alive),
+            ("Переписать описания top VLESS ключей (канал + номер + флаг)", run_rewrite_toplive_descriptions),
+            ("Записать top live VLESS ключи в git файлы", run_write_git_from_toplive),
+            ("Git commit + push без Telegram notify", run_git_commit_push_no_notify),
+        ]
+
     return [
         ("Сформировать JSON + top10", run_top10_only),
         ("Сформировать ключи из top10", run_keys_only),
@@ -275,20 +295,23 @@ def ask_run_mode():
     print("Выберите режим запуска:")
     print("1. Запустить прямо сейчас и выбрать шаг вручную")
     print("2. Запустить по данным из pipeline_config.py")
+    print("3. VLESS-only по pipeline_config.py: без SS и без Telegram")
 
-    choice = input("Введите 1 или 2: ").strip()
+    choice = input("Введите 1, 2 или 3: ").strip()
     if choice == "1":
         return "manual_now"
     if choice == "2":
         return "config"
+    if choice == "3":
+        return "vless_only_no_tg_config"
 
     print("Неверный выбор")
     sys.exit(1)
 
 
 def main():
-    steps = build_steps()
     run_mode = ask_run_mode()
+    steps = build_steps(vless_only_no_tg=(run_mode == "vless_only_no_tg_config"))
 
     if run_mode == "manual_now":
         start_idx = ask_manual_start_step(steps)
