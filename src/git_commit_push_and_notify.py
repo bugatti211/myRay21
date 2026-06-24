@@ -58,9 +58,8 @@ def run_git(args):
     )
 
 
-def next_day_filename(now: datetime) -> str:
-    next_idx = (now.weekday() + 1) % 7
-    return DAY_FILES[next_idx]
+def current_day_filename(now: datetime) -> str:
+    return DAY_FILES[now.weekday()]
 
 
 def send_telegram_message(token: str, chat_id: str, text: str) -> None:
@@ -152,7 +151,7 @@ def main() -> int:
         print("[done] commit + push complete")
         return 0
 
-    updated_day_file = next_day_filename(datetime.now())
+    updated_day_file = current_day_filename(datetime.now())
     text = build_notify_text(updated_file=updated_day_file)
     try:
         send_telegram_message(token=token, chat_id=chat_id, text=text)

@@ -97,7 +97,7 @@
   - Fallback: file/4LiveKeys/
   - Legacy fallback: file/3KeysFromGit/
 - Кладет данные в:
-  - git/<day-file следующего дня: 1Mond..7Sand>
+  - git/<day-file текущего дня: 1Mond..7Sand>
   - git/WhiteKeys
   - git/RU_other
 

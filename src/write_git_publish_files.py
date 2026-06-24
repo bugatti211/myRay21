@@ -141,9 +141,8 @@ def resolve_source_dir() -> Path:
     return PRIMARY_SOURCE_DIR
 
 
-def next_day_filename(now: datetime) -> str:
-    next_idx = (now.weekday() + 1) % 7
-    return DAY_FILES[next_idx]
+def current_day_filename(now: datetime) -> str:
+    return DAY_FILES[now.weekday()]
 
 
 def build_header(file_title: str, updated_at: str) -> str:
@@ -199,7 +198,7 @@ def main() -> int:
     ru_rows = [rewrite_desc(row, i + 1, CHANNEL_TEXT) for i, row in enumerate(ru_rows_raw)]
 
     targets: Dict[str, Path] = {
-        "ordinary": GIT_DIR / next_day_filename(datetime.now()),
+        "ordinary": GIT_DIR / current_day_filename(datetime.now()),
         "white": GIT_DIR / WHITE_KEYS_TARGET,
         "ru": GIT_DIR / RU_OTHER_TARGET,
     }
