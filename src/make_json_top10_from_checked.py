@@ -21,17 +21,28 @@ def main():
     parser.add_argument("--output-dir", default="file/2TopLinksFromGit")
     parser.add_argument("--default-name", default="default")
     parser.add_argument("--whitelist-name", default="whiteList")
+    parser.add_argument("--xray-bin", default="xrayFile/xray")
+    parser.add_argument("--concurrency", type=int, default=50)
+    parser.add_argument("--timeout", type=float, default=10.0)
     args = parser.parse_args()
 
     default_result = build_json_and_top10(
         Path(args.input),
         Path(args.output_dir),
         args.default_name,
+        Path(args.xray_bin),
+        args.concurrency,
+        args.timeout,
+        30000,
     )
     whitelist_result = build_json_and_top10(
         Path(args.whitelist_input),
         Path(args.output_dir),
         args.whitelist_name,
+        Path(args.xray_bin),
+        args.concurrency,
+        args.timeout,
+        60000,
     )
     print(f"[default] Готово: {default_result['json_path']}")
     print(f"[default] Готово: {default_result['top10_path']}")

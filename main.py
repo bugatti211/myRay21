@@ -71,16 +71,27 @@ def run_top10_only():
     input_path = "file/1AllLinksFromGit/default.txt"
     whitelist_path = "file/1AllLinksFromGit/whiteList.txt"
     output_dir = "file/2TopLinksFromGit"
+    xray_bin = "xrayFile/xray"
+    concurrency = int(config_value("SUBS_SELECTION_CONCURRENCY", 50))
+    timeout = float(config_value("SUBS_SELECTION_TIMEOUT", 10))
 
     default_result = build_json_and_top10(
         Path(input_path),
         Path(output_dir),
         "default",
+        Path(xray_bin),
+        concurrency,
+        timeout,
+        30000,
     )
     whitelist_result = build_json_and_top10(
         Path(whitelist_path),
         Path(output_dir),
         "whiteList",
+        Path(xray_bin),
+        concurrency,
+        timeout,
+        60000,
     )
     print(f"\n[default] Готово: {default_result['json_path']}")
     print(f"[default] Готово: {default_result['top10_path']}")
