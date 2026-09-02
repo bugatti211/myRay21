@@ -46,6 +46,7 @@ WORD_TO_FLAG = {
 }
 
 
+<<<<<<< HEAD
 def to_flag_from_code(code: str):
     code = code.upper()
     if code in COUNTRY_TO_FLAG:
@@ -56,6 +57,8 @@ def to_flag_from_code(code: str):
     return chr(base + ord(code[0]) - ord("A")) + chr(base + ord(code[1]) - ord("A"))
 
 
+=======
+>>>>>>> authostart
 def extract_flag_from_text(text: str):
     decoded = unquote(text or "")
 

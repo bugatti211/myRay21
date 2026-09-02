@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 Пошаговая схема (актуально для нового main.py)
 
 Важно по порядку:
@@ -134,3 +135,93 @@
   - Те же источники, что у шагов 7, 8, 9.
 - Кладет данные в:
   - Те же выходы, что у шагов 7, 8, 9.
+=======
+Пошаговая схема VLESS/Hysteria 2 пайплайна
+
+Запуск:
+- Команда: python3 main.py
+- Меню выбора режима отсутствует.
+- Ежедневные точки запуска берутся из списка START_TIME в pipeline_config.py.
+- После выполнения процесс ожидает следующую точку расписания.
+- START_TIME = None или [] означает один немедленный запуск.
+- Выполнение начинается с START_STEP в pipeline_config.py.
+- SS-ключи не проверяются и не отправляются в Telegram.
+- Публикация завершается git commit + push без Telegram-уведомления.
+
+
+Шаг 1. Сформировать VLESS/Hysteria 2 ключи из top15
+- Вход:
+  - file/2TopLinksFromGit/whiteList_top15.txt
+- Выход:
+  - file/3KeysFromGit/vless.txt
+  - file/3KeysFromGit/vless_RU.txt
+- Hysteria 2 принимается в форматах hysteria2:// и hy2://.
+
+
+Шаг 2. Скачать опубликованные подписки и проверить ключи через Xray
+- Скрипт запускается с флагом --skip-ss.
+- Скачиваются main, WhiteKeys и WhiteKeys2.
+- Их ключи добавляются к новым и повторно проходят Xray.
+- Для первой миграции используются дневные файлы и RU_other.
+- Вход:
+  - file/3KeysFromGit/vless.txt
+  - file/3KeysFromGit/vless_RU.txt
+  - xrayFile/xray
+- Выход:
+  - file/4LiveKeys/vless_ping_ok.txt
+  - file/4LiveKeys/vless_RU_ping_ok.txt
+
+
+Шаг 3. Повторно проверить живые ключи и выбрать лучшие
+- Вход:
+  - file/4LiveKeys/*_ping_ok.txt
+- Выход:
+  - file/5TopLiveKeys/*_ping_ok.txt
+
+
+Шаг 4. Переписать описания top-ключей
+- Формат описания: канал + номер + флаг.
+- Файлы изменяются на месте:
+  - file/5TopLiveKeys/*_ping_ok.txt
+
+
+Шаг 5. Подготовить файлы публикации
+- Вход:
+  - file/5TopLiveKeys/
+  - file/4LiveKeys/ для дополнительных RU-ключей
+- Выход:
+  - git/main
+  - git/WhiteKeys
+  - git/WhiteKeys2
+- Старые 1Mond..7Sand и RU_other удаляются после успешной записи.
+
+
+Шаг 6. Собрать WLTest
+- Вход:
+  - file/1AllLinksFromGit/whiteList.txt
+  - normalized_networks.txt
+- Сначала скачиваются все источники и выбираются VLESS/Hysteria 2 ключи с
+  буквальным IP из списка сетей.
+- Все совпавшие ключи записываются без ping и без top-лимита.
+- Выход:
+  - git/WLTest
+  - file/6NetworkFilteredTest/WLTest_candidates.txt
+  - file/6NetworkFilteredTest/WLTest_report.json
+
+
+Шаг 7. Опубликовать изменения
+- Выполняется src/git_commit_push.py.
+- Результат:
+  - git add
+  - git commit
+  - git push origin main
+- Telegram-уведомление не отправляется.
+
+
+Утилита шага 6
+- src/build_wltest_subscription.py
+  - Читает все URL из whiteList.txt.
+  - Сначала фильтрует ключи по IP из normalized_networks.txt.
+  - Пишет все совпавшие ключи в git/WLTest без ping.
+  - Автоматически запускается основным пайплайном на шаге 6.
+>>>>>>> authostart

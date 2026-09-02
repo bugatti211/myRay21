@@ -1,6 +1,13 @@
 .env
-xrayfile/
+xrayFile/
 git/
 file/
 logs/
+<<<<<<< HEAD
 handmade/
+=======
+handmade/
+__pycache__/
+*.py[cod]
+.DS_Store
+>>>>>>> authostart

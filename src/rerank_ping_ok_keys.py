@@ -7,7 +7,18 @@ import tempfile
 import time
 from pathlib import Path
 
+<<<<<<< HEAD
 from ping_keys_with_xray import TEST_URLS, build_config, parse_ss, parse_vless
+=======
+from ping_keys_with_xray import (
+    TEST_URLS,
+    build_config,
+    parse_hysteria2,
+    parse_ss,
+    parse_vless,
+    stop_process,
+)
+>>>>>>> authostart
 
 
 def read_keys(path: Path):
@@ -21,7 +32,11 @@ def read_keys(path: Path):
             continue
         if key in seen:
             continue
+<<<<<<< HEAD
         if key.startswith("ss://") or key.startswith("vless://"):
+=======
+        if key.startswith(("ss://", "vless://", "hysteria2://", "hy2://")):
+>>>>>>> authostart
             seen.add(key)
             out.append(key)
     return out
@@ -32,12 +47,26 @@ def key_kind(key: str):
         return "ss"
     if key.startswith("vless://"):
         return "vless"
+<<<<<<< HEAD
+=======
+    if key.startswith(("hysteria2://", "hy2://")):
+        return "hysteria2"
+>>>>>>> authostart
     return "unknown"
 
 
 async def probe_once(key: str, xray_bin: Path, socks_port: int, timeout: float):
     try:
+<<<<<<< HEAD
         outbound = parse_vless(key) if key.startswith("vless://") else parse_ss(key)
+=======
+        if key.startswith("vless://"):
+            outbound = parse_vless(key)
+        elif key.startswith(("hysteria2://", "hy2://")):
+            outbound = parse_hysteria2(key)
+        else:
+            outbound = parse_ss(key)
+>>>>>>> authostart
     except Exception:
         return None
 
@@ -87,6 +116,7 @@ async def probe_once(key: str, xray_bin: Path, socks_port: int, timeout: float):
     except Exception:
         return None
     finally:
+<<<<<<< HEAD
         if proc and proc.returncode is None:
             proc.terminate()
             try:
@@ -97,17 +127,27 @@ async def probe_once(key: str, xray_bin: Path, socks_port: int, timeout: float):
                     await proc.wait()
                 except Exception:
                     pass
+=======
+        await stop_process(proc)
+>>>>>>> authostart
         try:
             cfg_path.unlink(missing_ok=True)
         except Exception:
             pass
 
 
+<<<<<<< HEAD
 async def measure_key(key: str, runs: int, xray_bin: Path, timeout: float, base_port: int, idx: int):
     lats = []
     for run_idx in range(runs):
         port = base_port + (idx * 10) + run_idx
         lat = await probe_once(key, xray_bin, port, timeout)
+=======
+async def measure_key(key: str, runs: int, xray_bin: Path, timeout: float, socks_port: int):
+    lats = []
+    for _ in range(runs):
+        lat = await probe_once(key, xray_bin, socks_port, timeout)
+>>>>>>> authostart
         if lat is not None:
             lats.append(lat)
 
@@ -135,6 +175,7 @@ async def rerank_file(path: Path, out_dir: Path, xray_bin: Path, concurrency: in
 
     print(f"[{path.name}] ключей: {len(keys)}")
 
+<<<<<<< HEAD
     sem = asyncio.Semaphore(max(1, concurrency))
     done = 0
 
@@ -149,36 +190,88 @@ async def rerank_file(path: Path, out_dir: Path, xray_bin: Path, concurrency: in
                 base_port=base_port,
                 idx=idx,
             )
+=======
+    workers_count = min(max(1, concurrency), len(keys))
+    available_ports = asyncio.Queue()
+    for worker_idx in range(workers_count):
+        available_ports.put_nowait(base_port + worker_idx)
+    done = 0
+
+    async def one(key: str):
+        nonlocal done
+        socks_port = await available_ports.get()
+        try:
+            try:
+                result = await measure_key(
+                    key=key,
+                    runs=runs,
+                    xray_bin=xray_bin,
+                    timeout=timeout,
+                    socks_port=socks_port,
+                )
+            except Exception as exc:
+                print(
+                    f"[{path.name}] ошибка worker: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                result = None
+        finally:
+            available_ports.put_nowait(socks_port)
+>>>>>>> authostart
         done += 1
         if done % 50 == 0 or done == len(keys):
             print(f"[{path.name}] проверено {done}/{len(keys)}")
         return result
 
+<<<<<<< HEAD
     results = await asyncio.gather(*(one(i, k) for i, k in enumerate(keys)))
+=======
+    results = await asyncio.gather(*(one(key) for key in keys))
+>>>>>>> authostart
     alive = [x for x in results if x is not None]
 
     ss_ranked = sorted(
         [x for x in alive if key_kind(x["key"]) == "ss"],
         key=lambda x: (-x["success_runs"], x["score_ms"], x["min_ms"]),
     )
+<<<<<<< HEAD
     vless_ranked = sorted(
         [x for x in alive if key_kind(x["key"]) == "vless"],
+=======
+    vless_like_ranked = sorted(
+        [x for x in alive if key_kind(x["key"]) in {"vless", "hysteria2"}],
+>>>>>>> authostart
         key=lambda x: (-x["success_runs"], x["score_ms"], x["min_ms"]),
     )
 
     selected = []
+<<<<<<< HEAD
     selected.extend(vless_ranked[:300])
     selected.extend(ss_ranked[:10])
 
     # If file contains only one protocol, keep natural order for that protocol.
     selected_sorted = sorted(selected, key=lambda x: (0 if key_kind(x["key"]) == "vless" else 1, -x["success_runs"], x["score_ms"], x["min_ms"]))
+=======
+    selected.extend(vless_like_ranked[:300])
+    selected.extend(ss_ranked[:10])
+
+    # If file contains only one protocol, keep natural order for that protocol.
+    selected_sorted = sorted(
+        selected,
+        key=lambda x: (0 if key_kind(x["key"]) in {"vless", "hysteria2"} else 1, -x["success_runs"], x["score_ms"], x["min_ms"]),
+    )
+>>>>>>> authostart
     out_keys = [x["key"] for x in selected_sorted]
 
     out_path = out_dir / path.name
     out_path.write_text("\n".join(out_keys) + ("\n" if out_keys else ""), encoding="utf-8")
 
     print(
+<<<<<<< HEAD
         f"[{path.name}] alive={len(alive)}, vless_top={min(300, len(vless_ranked))}, "
+=======
+        f"[{path.name}] alive={len(alive)}, vless_hysteria2_top={min(300, len(vless_like_ranked))}, "
+>>>>>>> authostart
         f"ss_top={min(10, len(ss_ranked))} -> {out_path}"
     )
 
@@ -202,6 +295,12 @@ async def main_async(args):
 
     print(f"Найдено файлов: {len(files)}")
     for i, path in enumerate(files):
+<<<<<<< HEAD
+=======
+        file_base_port = args.base_port + (i * 1000)
+        if file_base_port < 1 or file_base_port + max(1, args.concurrency) - 1 > 65_535:
+            raise ValueError(f"port range is invalid for {path.name}")
+>>>>>>> authostart
         await rerank_file(
             path=path,
             out_dir=out_dir,
@@ -209,7 +308,11 @@ async def main_async(args):
             concurrency=args.concurrency,
             timeout=args.timeout,
             runs=args.runs,
+<<<<<<< HEAD
             base_port=args.base_port + (i * 1000),
+=======
+            base_port=file_base_port,
+>>>>>>> authostart
         )
 
 
