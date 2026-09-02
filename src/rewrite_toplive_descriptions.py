@@ -46,16 +46,6 @@ WORD_TO_FLAG = {
 }
 
 
-def to_flag_from_code(code: str):
-    code = code.upper()
-    if code in COUNTRY_TO_FLAG:
-        return COUNTRY_TO_FLAG[code]
-    if len(code) != 2 or not code.isalpha():
-        return None
-    base = ord("🇦")
-    return chr(base + ord(code[0]) - ord("A")) + chr(base + ord(code[1]) - ord("A"))
-
-
 def extract_flag_from_text(text: str):
     decoded = unquote(text or "")
 

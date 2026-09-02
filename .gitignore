@@ -1,6 +1,9 @@
 .env
-xrayfile/
+xrayFile/
 git/
 file/
 logs/
 handmade/
+__pycache__/
+*.py[cod]
+.DS_Store

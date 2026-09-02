@@ -7,7 +7,14 @@ import tempfile
 import time
 from pathlib import Path
 
-from ping_keys_with_xray import TEST_URLS, build_config, parse_ss, parse_trojan, parse_vless
+from ping_keys_with_xray import (
+    TEST_URLS,
+    build_config,
+    parse_hysteria2,
+    parse_ss,
+    parse_vless,
+    stop_process,
+)
 
 
 def read_keys(path: Path):
@@ -21,7 +28,7 @@ def read_keys(path: Path):
             continue
         if key in seen:
             continue
-        if key.startswith("ss://") or key.startswith("vless://") or key.startswith("trojan://"):
+        if key.startswith(("ss://", "vless://", "hysteria2://", "hy2://")):
             seen.add(key)
             out.append(key)
     return out
@@ -32,8 +39,8 @@ def key_kind(key: str):
         return "ss"
     if key.startswith("vless://"):
         return "vless"
-    if key.startswith("trojan://"):
-        return "trojan"
+    if key.startswith(("hysteria2://", "hy2://")):
+        return "hysteria2"
     return "unknown"
 
 
@@ -41,8 +48,8 @@ async def probe_once(key: str, xray_bin: Path, socks_port: int, timeout: float):
     try:
         if key.startswith("vless://"):
             outbound = parse_vless(key)
-        elif key.startswith("trojan://"):
-            outbound = parse_trojan(key)
+        elif key.startswith(("hysteria2://", "hy2://")):
+            outbound = parse_hysteria2(key)
         else:
             outbound = parse_ss(key)
     except Exception:
@@ -94,27 +101,17 @@ async def probe_once(key: str, xray_bin: Path, socks_port: int, timeout: float):
     except Exception:
         return None
     finally:
-        if proc and proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=1.5)
-            except Exception:
-                proc.kill()
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass
+        await stop_process(proc)
         try:
             cfg_path.unlink(missing_ok=True)
         except Exception:
             pass
 
 
-async def measure_key(key: str, runs: int, xray_bin: Path, timeout: float, base_port: int, idx: int):
+async def measure_key(key: str, runs: int, xray_bin: Path, timeout: float, socks_port: int):
     lats = []
-    for run_idx in range(runs):
-        port = base_port + (idx * 10) + run_idx
-        lat = await probe_once(key, xray_bin, port, timeout)
+    for _ in range(runs):
+        lat = await probe_once(key, xray_bin, socks_port, timeout)
         if lat is not None:
             lats.append(lat)
 
@@ -142,26 +139,38 @@ async def rerank_file(path: Path, out_dir: Path, xray_bin: Path, concurrency: in
 
     print(f"[{path.name}] ключей: {len(keys)}")
 
-    sem = asyncio.Semaphore(max(1, concurrency))
+    workers_count = min(max(1, concurrency), len(keys))
+    available_ports = asyncio.Queue()
+    for worker_idx in range(workers_count):
+        available_ports.put_nowait(base_port + worker_idx)
     done = 0
 
-    async def one(idx: int, key: str):
+    async def one(key: str):
         nonlocal done
-        async with sem:
-            result = await measure_key(
-                key=key,
-                runs=runs,
-                xray_bin=xray_bin,
-                timeout=timeout,
-                base_port=base_port,
-                idx=idx,
-            )
+        socks_port = await available_ports.get()
+        try:
+            try:
+                result = await measure_key(
+                    key=key,
+                    runs=runs,
+                    xray_bin=xray_bin,
+                    timeout=timeout,
+                    socks_port=socks_port,
+                )
+            except Exception as exc:
+                print(
+                    f"[{path.name}] ошибка worker: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                result = None
+        finally:
+            available_ports.put_nowait(socks_port)
         done += 1
         if done % 50 == 0 or done == len(keys):
             print(f"[{path.name}] проверено {done}/{len(keys)}")
         return result
 
-    results = await asyncio.gather(*(one(i, k) for i, k in enumerate(keys)))
+    results = await asyncio.gather(*(one(key) for key in keys))
     alive = [x for x in results if x is not None]
 
     ss_ranked = sorted(
@@ -169,7 +178,7 @@ async def rerank_file(path: Path, out_dir: Path, xray_bin: Path, concurrency: in
         key=lambda x: (-x["success_runs"], x["score_ms"], x["min_ms"]),
     )
     vless_like_ranked = sorted(
-        [x for x in alive if key_kind(x["key"]) in {"vless", "trojan"}],
+        [x for x in alive if key_kind(x["key"]) in {"vless", "hysteria2"}],
         key=lambda x: (-x["success_runs"], x["score_ms"], x["min_ms"]),
     )
 
@@ -180,7 +189,7 @@ async def rerank_file(path: Path, out_dir: Path, xray_bin: Path, concurrency: in
     # If file contains only one protocol, keep natural order for that protocol.
     selected_sorted = sorted(
         selected,
-        key=lambda x: (0 if key_kind(x["key"]) in {"vless", "trojan"} else 1, -x["success_runs"], x["score_ms"], x["min_ms"]),
+        key=lambda x: (0 if key_kind(x["key"]) in {"vless", "hysteria2"} else 1, -x["success_runs"], x["score_ms"], x["min_ms"]),
     )
     out_keys = [x["key"] for x in selected_sorted]
 
@@ -188,7 +197,7 @@ async def rerank_file(path: Path, out_dir: Path, xray_bin: Path, concurrency: in
     out_path.write_text("\n".join(out_keys) + ("\n" if out_keys else ""), encoding="utf-8")
 
     print(
-        f"[{path.name}] alive={len(alive)}, vless_trojan_top={min(300, len(vless_like_ranked))}, "
+        f"[{path.name}] alive={len(alive)}, vless_hysteria2_top={min(300, len(vless_like_ranked))}, "
         f"ss_top={min(10, len(ss_ranked))} -> {out_path}"
     )
 
@@ -212,6 +221,9 @@ async def main_async(args):
 
     print(f"Найдено файлов: {len(files)}")
     for i, path in enumerate(files):
+        file_base_port = args.base_port + (i * 1000)
+        if file_base_port < 1 or file_base_port + max(1, args.concurrency) - 1 > 65_535:
+            raise ValueError(f"port range is invalid for {path.name}")
         await rerank_file(
             path=path,
             out_dir=out_dir,
@@ -219,7 +231,7 @@ async def main_async(args):
             concurrency=args.concurrency,
             timeout=args.timeout,
             runs=args.runs,
-            base_port=args.base_port + (i * 1000),
+            base_port=file_base_port,
         )
 
 

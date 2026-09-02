@@ -1,136 +1,88 @@
-Пошаговая схема (актуально для нового main.py)
+Пошаговая схема VLESS/Hysteria 2 пайплайна
 
-Важно по порядку:
-- Для полной подготовки данных: шаги 3 -> 4 -> 5 -> 6.
-- Для публикации: шаги 7 -> 8 -> 9 (или сразу шаг 10).
-
-
-Шаг 1 (main.py: "Сформировать только JSON + top10")
-- Что делает:
-  - Читает файл со списком подписок и их статистикой (парами строк: URL + "total-unique-alive").
-  - Создает JSON со всеми записями и TXT со ссылками top10 по alive.
-- Берет данные из:
-  - file/1AllLinksFromGit/default.txt (по умолчанию, можно указать другой файл).
-- Кладет данные в:
-  - file/2TopLinksFromGit/YYYY-MM-DD.json
-  - file/2TopLinksFromGit/YYYY-MM-DD_top10.txt
+Запуск:
+- Команда: python3 main.py
+- Меню выбора режима отсутствует.
+- Ежедневные точки запуска берутся из списка START_TIME в pipeline_config.py.
+- После выполнения процесс ожидает следующую точку расписания.
+- START_TIME = None или [] означает один немедленный запуск.
+- Выполнение начинается с START_STEP в pipeline_config.py.
+- SS-ключи не проверяются и не отправляются в Telegram.
+- Публикация завершается git commit + push без Telegram-уведомления.
 
 
-Шаг 2 (main.py: "Сформировать только ключи из top10")
-- Что делает:
-  - Берет top10 ссылки, скачивает их содержимое, извлекает ключи vless/ss.
-  - Делит ключи на обычные и RU.
-- Берет данные из:
-  - file/2TopLinksFromGit/YYYY-MM-DD_top10.txt (по умолчанию).
-  - Сетевые URL из этого top10 файла.
-- Кладет данные в:
-  - file/3KeysFromGit/vless.txt
-  - file/3KeysFromGit/ss.txt
-  - file/3KeysFromGit/vless_RU.txt
-  - file/3KeysFromGit/ss_RU.txt
-
-
-Шаг 3 (main.py: "Полный цикл (JSON + top10 + ключи)")
-- Что делает:
-  - Выполняет шаг 1, затем шаг 2 подряд.
-- Берет данные из:
-  - file/1AllLinksFromGit/default.txt (по умолчанию) + сетевые URL из top10.
-- Кладет данные в:
-  - file/2TopLinksFromGit/YYYY-MM-DD.json
-  - file/2TopLinksFromGit/YYYY-MM-DD_top10.txt
-  - file/3KeysFromGit/vless.txt
-  - file/3KeysFromGit/ss.txt
-  - file/3KeysFromGit/vless_RU.txt
-  - file/3KeysFromGit/ss_RU.txt
-
-
-Шаг 4 (main.py: "Проверка ключей через xray (ping) и запись живых")
-- Что делает:
-  - Проверяет ключи через xray + curl.
-  - Оставляет только живые ключи.
-- Берет данные из:
+Шаг 1. Сформировать VLESS/Hysteria 2 ключи из top15
+- Вход:
+  - file/2TopLinksFromGit/whiteList_top15.txt
+- Выход:
   - file/3KeysFromGit/vless.txt
   - file/3KeysFromGit/vless_RU.txt
-  - file/3KeysFromGit/ss.txt
-  - file/3KeysFromGit/ss_RU.txt
+- Hysteria 2 принимается в форматах hysteria2:// и hy2://.
+
+
+Шаг 2. Скачать опубликованные подписки и проверить ключи через Xray
+- Скрипт запускается с флагом --skip-ss.
+- Скачиваются main, WhiteKeys и WhiteKeys2.
+- Их ключи добавляются к новым и повторно проходят Xray.
+- Для первой миграции используются дневные файлы и RU_other.
+- Вход:
+  - file/3KeysFromGit/vless.txt
+  - file/3KeysFromGit/vless_RU.txt
   - xrayFile/xray
-- Кладет данные в:
+- Выход:
   - file/4LiveKeys/vless_ping_ok.txt
   - file/4LiveKeys/vless_RU_ping_ok.txt
-  - file/4LiveKeys/ss_ping_ok.txt
-  - file/4LiveKeys/ss_RU_ping_ok.txt
 
 
-Шаг 5 (main.py: "3 прогона по живым ключам и отбор топ лучших")
-- Что делает:
-  - Повторно пингует живые ключи (несколько прогонов), ранжирует по стабильности и скорости.
-  - Формирует top-файлы для публикации.
-- Берет данные из:
+Шаг 3. Повторно проверить живые ключи и выбрать лучшие
+- Вход:
   - file/4LiveKeys/*_ping_ok.txt
-  - xrayFile/xray
-- Кладет данные в:
-  - file/5TopLiveKeys/vless_ping_ok.txt
-  - file/5TopLiveKeys/vless_RU_ping_ok.txt
-  - file/5TopLiveKeys/ss_ping_ok.txt
-  - file/5TopLiveKeys/ss_RU_ping_ok.txt
-
-
-Шаг 6 (main.py: "Переписать описания top ключей")
-- Что делает:
-  - Переписывает description у ключей в формате: channel + номер + флаг.
-  - Изменяет файлы на месте.
-- Берет данные из:
+- Выход:
   - file/5TopLiveKeys/*_ping_ok.txt
-- Кладет данные в:
-  - file/5TopLiveKeys/*_ping_ok.txt (те же файлы, перезапись inplace)
 
 
-Шаг 7 (main.py: "Записать top live ключи в git файлы")
-- Что делает:
-  - Готовит итоговые файлы подписок в папке git с хедером.
-  - Текущая логика:
-    - Обычная подписка = vless_ping_ok.txt
-    - WhiteKeys = vless_RU_ping_ok.txt
-    - RU_other = vless_RU_ping_ok.txt + ss_RU_ping_ok.txt
-- Берет данные из:
-  - Основной источник: file/5TopLiveKeys/
-  - Fallback: file/4LiveKeys/
-  - Legacy fallback: file/3KeysFromGit/
-- Кладет данные в:
-  - git/<day-file текущего дня: 1Mond..7Sand>
+Шаг 4. Переписать описания top-ключей
+- Формат описания: канал + номер + флаг.
+- Файлы изменяются на месте:
+  - file/5TopLiveKeys/*_ping_ok.txt
+
+
+Шаг 5. Подготовить файлы публикации
+- Вход:
+  - file/5TopLiveKeys/
+  - file/4LiveKeys/ для дополнительных RU-ключей
+- Выход:
+  - git/main
   - git/WhiteKeys
-  - git/RU_other
+  - git/WhiteKeys2
+- Старые 1Mond..7Sand и RU_other удаляются после успешной записи.
 
 
-Шаг 8 (main.py: "Отправить SS ключи в Telegram")
-- Что делает:
-  - Отправляет SS ключи в Telegram по одному сообщению.
-- Берет данные из:
-  - Основной источник: file/5TopLiveKeys/ss_ping_ok.txt
-  - Fallback: file/4LiveKeys/ss_ping_ok.txt
-  - Legacy fallback: file/3KeysFromGit/ss.txt
-  - .env или env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-- Кладет данные в:
-  - В файлы не пишет.
-  - Отправляет сообщения в Telegram API.
+Шаг 6. Собрать WLTest
+- Вход:
+  - file/1AllLinksFromGit/whiteList.txt
+  - normalized_networks.txt
+- Сначала скачиваются все источники и выбираются VLESS/Hysteria 2 ключи с
+  буквальным IP из списка сетей.
+- Все совпавшие ключи записываются без ping и без top-лимита.
+- Выход:
+  - git/WLTest
+  - file/6NetworkFilteredTest/WLTest_candidates.txt
+  - file/6NetworkFilteredTest/WLTest_report.json
 
 
-Шаг 9 (main.py: "Git commit + push + Telegram notify")
-- Что делает:
-  - Проверяет изменения в папке git, делает add/commit/push.
-  - Отправляет уведомление в Telegram с ссылками на подписки.
-- Берет данные из:
-  - git/ (локальный репозиторий)
-  - .env или env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-- Кладет данные в:
-  - Удаленный GitHub (push в origin/main)
-  - Telegram API (сообщение-уведомление)
+Шаг 7. Опубликовать изменения
+- Выполняется src/git_commit_push.py.
+- Результат:
+  - git add
+  - git commit
+  - git push origin main
+- Telegram-уведомление не отправляется.
 
 
-Шаг 10 (main.py: "Полная публикация (7 -> 8 -> 9)")
-- Что делает:
-  - Последовательно запускает шаги 7, 8, 9.
-- Берет данные из:
-  - Те же источники, что у шагов 7, 8, 9.
-- Кладет данные в:
-  - Те же выходы, что у шагов 7, 8, 9.
+Утилита шага 6
+- src/build_wltest_subscription.py
+  - Читает все URL из whiteList.txt.
+  - Сначала фильтрует ключи по IP из normalized_networks.txt.
+  - Пишет все совпавшие ключи в git/WLTest без ping.
+  - Автоматически запускается основным пайплайном на шаге 6.
